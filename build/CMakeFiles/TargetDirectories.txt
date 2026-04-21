@@ -1,0 +1,5 @@
+C:/Users/Lenovo/Documents/GitHub/-bot-/build/CMakeFiles/BL_Pro_RET6.dir
+C:/Users/Lenovo/Documents/GitHub/-bot-/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/Lenovo/Documents/GitHub/-bot-/build/CMakeFiles/ZERO_CHECK.dir
+C:/Users/Lenovo/Documents/GitHub/-bot-/build/cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir
+C:/Users/Lenovo/Documents/GitHub/-bot-/build/cmake/stm32cubemx/CMakeFiles/USB_Device_Library.dir
