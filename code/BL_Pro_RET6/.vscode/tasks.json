@@ -1,0 +1,29 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: Build (Debug Preset)",
+            "type": "shell",
+            "command": "cmake --preset debug",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Flash: STM32_Programmer_CLI",
+            "type": "shell",
+            "command": "\"${config:stm32.programmerPath}\" -c port=SWD -w \"${workspaceFolder}/build/Debug/BL_Pro_RET6.elf\"",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        }
+    ]
+}
