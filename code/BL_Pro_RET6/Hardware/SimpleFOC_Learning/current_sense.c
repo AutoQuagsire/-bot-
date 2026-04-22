@@ -25,6 +25,14 @@ void CurrentSense_Enable(CurrentSense_t *cs)
 
 }
 
+uint8_t CurrentSense_Init(CurrentSense_t *cs)
+{
+    if (!cs) return 0;
+
+    cs->enabled = 0;
+    return 1;
+}
+
 void CurrentSense_Config(CurrentSense_t *cs,
     CurrentSense_ADCHandle adc, CurrentSense_TIMHandle tim, uint32_t TIM_Channel)
 {

@@ -8,6 +8,16 @@
 typedef void *CurrentSense_TIMHandle;
 typedef void *CurrentSense_ADCHandle;
 
+
+
+typedef struct {
+    float ia;
+    float ib;
+    float ic;
+} PhaseCurrent_t;
+
+
+
 typedef struct {
     int enabled;
     CurrentSense_TIMHandle tim;
@@ -17,10 +27,10 @@ typedef struct {
 } CurrentSense_t;
 
 /* Public API */
-void CurrentSense_Disable(CurrentSense_t *cs);
+uint8_t CurrentSense_Init(CurrentSense_t *cs);
 void CurrentSense_Enable(CurrentSense_t *cs);
-/* Configure a CurrentSense instance with opaque HAL handles */
-void CurrentSense_Config(CurrentSense_t *cs, CurrentSense_ADCHandle adc, CurrentSense_TIMHandle tim, uint32_t TIM_Channel);
-
+void CurrentSense_Disable(CurrentSense_t *cs);
+void CurrentSense_CalibrateOffsets(CurrentSense_t *cs);
+PhaseCurrent CurrentSense_GetPhaseCurrents(CurrentSense_t *cs);
 #endif /* CURRENT_SENSE_H */
 

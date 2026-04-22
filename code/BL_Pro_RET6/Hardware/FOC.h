@@ -106,7 +106,7 @@ void FOC_SetSVPWM(FOC_Motor_t *motor, float Uq, float sint, float cost, float Ud
 void FOC_SetSVPWM_ByAngle(float Uq, float angle_el);
 void FOC_ADC_Start(void);
 void FOC_ADC_Stop(void);
-void CurrentSense_Init(void);
+void CurrentSenser_Init(void);
 void Init_CunrrentCfg(CurrentConfig_t *cfg, float offsetA, float offsetB, float gain, volatile uint16_t *adc_buf);
 CurrentDetect_t GetPhaseCurrent(CurrentConfig_t *cfg);
 float cal_Iq_Id(float current_a, float current_b, float sint, float cost);
