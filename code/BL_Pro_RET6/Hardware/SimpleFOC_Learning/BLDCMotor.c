@@ -13,7 +13,6 @@ void linkDriver(Driver_t *driver, Motor_t *motor)
     if (!driver || !motor) return;
 
     motor->driver = driver;
-    driver->initialized = true;  // 假设这里直接标记为已初始化，实际可能需要更复杂的检查
 }
 
 
@@ -166,20 +165,18 @@ PID_current_d
 把 enabled = 1
 
 */
-void FOCMotor_enable(Motor_t *FOC_Motor)
+void FOCMotor_enable(Motor_t *motor)
 {
-    if (!FOC_Motor || !FOC_Motor->driver) return;
+    if (!motor || !motor->driver) return;
 
-    DRIVER_ENABLE();
-    Driver_SetPwm(FOC_Motor->driver, 0.0f, 0.0f, 0.0f);
+    Driver_Enable(motor->driver);
+    Driver_SetPwm(motor->driver, 0.0f, 0.0f, 0.0f);
 
-    if (FOC_Motor->current_sense) {
-        CurrentSense_Enable(FOC_Motor->current_sense);
+    if (motor->current_sense) {
+        CurrentSense_Enable(motor->current_sense);
     }
 
-    FOC_Motor->driver->enabled = 1;
-    FOC_Motor->state.enabled = 1;
-
+    motor->state.enabled = 1;
 }
 
 
