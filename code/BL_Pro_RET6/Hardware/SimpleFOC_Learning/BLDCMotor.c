@@ -124,25 +124,26 @@ uint8_t FOCMotor_init(Motor_t *FOC_Motor)
 （4）更新状态把 enabled = 0
 “先去能量，再断执行链”
 */
-void FOCMotor_disable(Motor_t *FOC_Motor)
+void FOCMotor_disable(Motor_t *motor)
 {
-    if (!FOC_Motor) return;
+    if (!motor || !motor->driver) return;
+    if (!motor->driver->initialized) return;
 
      //如果有 current sense，就先 disable 掉
-    if (FOC_Motor->current_sense) {
-        CurrentSense_Disable(FOC_Motor->current_sense);
+    if (motor->current_sense) {
+        CurrentSense_Disable(motor->current_sense);
     }
 
     //把 PWM 输出清零
-    Driver_SetPwm(FOC_Motor->driver, 0.0f, 0.0f, 0.0f);
+    Driver_SetPwm(motor->driver, 0.0f, 0.0f, 0.0f);
 
     //再禁用 driver
-    if (FOC_Motor->driver) {
-        Driver_Disable(FOC_Motor->driver);
+    if (motor->driver) {
+        Driver_Disable(motor->driver);
     }
 
     //更新状态把 enabled = 0
-    FOC_Motor->state.enabled = 0;
+    motor->state.enabled = 0;
 }
 
 
@@ -168,6 +169,7 @@ PID_current_d
 void FOCMotor_enable(Motor_t *motor)
 {
     if (!motor || !motor->driver) return;
+    if (!motor->driver->initialized) return;
 
     Driver_Enable(motor->driver);
     Driver_SetPwm(motor->driver, 0.0f, 0.0f, 0.0f);
