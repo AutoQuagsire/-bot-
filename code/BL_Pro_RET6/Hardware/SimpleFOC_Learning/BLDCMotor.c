@@ -13,7 +13,7 @@ void linkDriver(Driver_t *driver, Motor_t *motor)
     if (!driver || !motor) return;
 
     motor->driver = driver;
-    driver->initialized = 1;  // 假设这里直接标记为已初始化，实际可能需要更复杂的检查
+    driver->initialized = true;  // 假设这里直接标记为已初始化，实际可能需要更复杂的检查
 }
 
 
@@ -68,7 +68,7 @@ uint8_t FOCMotor_init(Motor_t *FOC_Motor)
     }
 
     // 检查 driver 是否已连接并初始化完成
-    if ((FOC_Motor->driver == 0) || (FOC_Motor->driver->initialized == 0)) {
+    if (!FOC_Motor->driver || !(FOC_Motor->driver->initialized)) {
         FOC_Motor->state.motor_status = motor_init_failed;
         FOC_Motor->state.enabled = 0;
         return 0;

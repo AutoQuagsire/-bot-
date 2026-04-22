@@ -19,6 +19,8 @@ typedef struct {
 /* Public API */
 void CurrentSense_Disable(CurrentSense_t *cs);
 void CurrentSense_Enable(CurrentSense_t *cs);
+/* Configure a CurrentSense instance with opaque HAL handles */
+void CurrentSense_Config(CurrentSense_t *cs, CurrentSense_ADCHandle adc, CurrentSense_TIMHandle tim, uint32_t TIM_Channel);
 
 #endif /* CURRENT_SENSE_H */
 

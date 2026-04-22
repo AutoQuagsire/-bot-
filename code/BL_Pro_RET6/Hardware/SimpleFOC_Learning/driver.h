@@ -2,6 +2,7 @@
 #define DRIVER_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "sys.h"
 
 typedef enum {
@@ -10,7 +11,7 @@ typedef enum {
 } DriverSide_t;
 
 typedef struct {
-    uint8_t initialized;
+    bool initialized;
     uint8_t enabled;
     TIM_HandleTypeDef *htim;
     uint32_t chA;
@@ -30,9 +31,10 @@ void Driver_SetPwm(Driver_t *driver, float ua, float ub, float uc);
 void Driver_Disable(Driver_t *driver);
 
 /* Driver initialization and accessor */
-void Driver_Init(Driver_t *driver, TIM_HandleTypeDef *htim, 
-                 uint32_t chA, uint32_t chB, uint32_t chC,
-                 float voltage_limit);
+uint8_t Driver_Init(Driver_t *driver);
+void Driver_LinkHardware(Driver_t *driver, TIM_HandleTypeDef *htim,
+                         uint32_t chA, uint32_t chB, uint32_t chC,
+                         float voltage_limit);
 Driver_t* Driver_GetInstance(DriverSide_t side);
 
 #endif /* DRIVER_H */

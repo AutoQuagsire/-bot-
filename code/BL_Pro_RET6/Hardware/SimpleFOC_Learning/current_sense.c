@@ -25,8 +25,8 @@ void CurrentSense_Enable(CurrentSense_t *cs)
 
 }
 
-void CurrentSense_Init(CurrentSense_t *cs, 
-    ADC_HandleTypeDef *adc, TIM_HandleTypeDef *tim, uint32_t TIM_Channel)
+void CurrentSense_Config(CurrentSense_t *cs,
+    CurrentSense_ADCHandle adc, CurrentSense_TIMHandle tim, uint32_t TIM_Channel)
 {
     if (!cs) return;
 

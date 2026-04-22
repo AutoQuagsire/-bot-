@@ -50,9 +50,9 @@ void Driver_Disable(Driver_t *driver)
 }
 
 
-void Driver_Init(Driver_t *driver, TIM_HandleTypeDef *htim,
-                 uint32_t chA, uint32_t chB, uint32_t chC,
-                 float voltage_limit)
+void Driver_LinkHardware(Driver_t *driver, TIM_HandleTypeDef *htim,
+                         uint32_t chA, uint32_t chB, uint32_t chC,
+                         float voltage_limit)
 {
     if (!driver || !htim) return;
 
@@ -62,7 +62,28 @@ void Driver_Init(Driver_t *driver, TIM_HandleTypeDef *htim,
     driver->chC = chC;
     driver->voltage_limit = voltage_limit;
     driver->enabled = 0;
+    driver->initialized = 0;
+}
+
+
+
+uint8_t Driver_Init(Driver_t *driver)
+{
+    if (!driver || !driver->htim) return 0;
+
+    driver->initialized = 0;
+    driver->enabled = 0;
+
+    if (HAL_TIM_PWM_Start(driver->htim, driver->chA) != HAL_OK) return 0;
+    if (HAL_TIM_PWM_Start(driver->htim, driver->chB) != HAL_OK) return 0;
+    if (HAL_TIM_PWM_Start(driver->htim, driver->chC) != HAL_OK) return 0;
+
+    __HAL_TIM_SET_COMPARE(driver->htim, driver->chA, 0);
+    __HAL_TIM_SET_COMPARE(driver->htim, driver->chB, 0);
+    __HAL_TIM_SET_COMPARE(driver->htim, driver->chC, 0);
+
     driver->initialized = 1;
+    return 1;
 }
 
 
