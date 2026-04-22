@@ -24,3 +24,13 @@ void CurrentSense_Enable(CurrentSense_t *cs)
     cs->enabled = 1;
 
 }
+
+void CurrentSense_Init(CurrentSense_t *cs, 
+    ADC_HandleTypeDef *adc, TIM_HandleTypeDef *tim, uint32_t TIM_Channel)
+{
+    if (!cs) return;
+
+    cs->tim = tim;
+    cs->adc = adc;
+    cs->TIM_Channel = TIM_Channel;
+}

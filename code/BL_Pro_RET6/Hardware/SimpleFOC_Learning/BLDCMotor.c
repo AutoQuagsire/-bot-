@@ -181,3 +181,18 @@ void FOCMotor_enable(Motor_t *FOC_Motor)
     FOC_Motor->state.enabled = 1;
 
 }
+
+
+
+void MotorParam_Init(Motor_t *motor, float pole_pairs, float phase_resistance, 
+                    float kv, float Ld, float Lq)
+{
+    if (!motor) return;
+
+    motor->param.pole_pairs = pole_pairs;
+    motor->param.phase_resistance = phase_resistance;
+    motor->param.kv = kv;
+    motor->param.Ld = Ld;
+    motor->param.Lq = Lq;
+
+}
