@@ -1,7 +1,7 @@
 #include "stm32g4xx_hal.h"
 #include "current_sense.h"
 
-CurrentSense_t current_sense;
+
 
 void CurrentSense_Disable(CurrentSense_t *cs)
 {
