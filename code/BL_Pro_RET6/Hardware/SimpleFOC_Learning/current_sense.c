@@ -1,7 +1,26 @@
+#include "stm32g4xx_hal.h"
+#include "current_sense.h"
+
 CurrentSense_t current_sense;
 
 void CurrentSense_Disable(CurrentSense_t *cs)
 {
     if (!cs) return;
+
+    // 关闭ADC DMA和定时器PWM输出
+    HAL_ADC_Stop_DMA((ADC_HandleTypeDef*)cs->adc);
+    HAL_TIM_PWM_Stop((TIM_HandleTypeDef*)cs->tim, cs->TIM_Channel);
     cs->enabled = 0;
+}
+
+
+void CurrentSense_Enable(CurrentSense_t *cs)
+{
+    if (!cs) return;
+
+    // 启用ADC DMA和定时器PWM输出
+    HAL_ADC_Start_DMA((ADC_HandleTypeDef*)cs->adc, cs->adc_buf, 2);
+    HAL_TIM_PWM_Start((TIM_HandleTypeDef*)cs->tim, cs->TIM_Channel);
+    cs->enabled = 1;
+
 }

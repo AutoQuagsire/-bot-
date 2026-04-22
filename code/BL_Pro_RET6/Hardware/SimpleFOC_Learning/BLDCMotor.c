@@ -1,9 +1,14 @@
+#include "BLDCMotor.h"
+#include "driver.h"
+#include "current_sense.h"
+
+
+
 
 
 //预留代码：实现功能：把一个驱动器对象的指针，挂到电机对象上
-void linkDriver()
+void linkDriver(void)
 {
-
 
 }
 
@@ -51,11 +56,11 @@ void linkDriver()
     再延时
     把状态设成 motor_uncalibrated
 */ 
-void init()
+void init(void)
+
 {
 
 }
-
 
 
 
@@ -70,18 +75,24 @@ uint8_t enabled;
 （4）更新状态把 enabled = 0
 “先去能量，再断执行链”
 */
-void disable()
+void disable(Motor_t *FOC_Motor)
 {
-    CurrentSense_Disable(&current_sense);
+    if (!FOC_Motor) return;
 
-    // driver 可能尚未 link，避免空指针访问
-    if (!driver) {
-        enabled = 0;
-        return;
+     //如果有 current sense，就先 disable 掉
+    if (FOC_Motor->current_sense) {
+        CurrentSense_Disable(FOC_Motor->current_sense);
     }
 
-    Driver_Disable(driver);
+    //把 PWM 输出清零
+    Driver_SetPwm(FOC_Motor->driver, 0.0f, 0.0f, 0.0f);
 
+    //再禁用 driver
+    if (FOC_Motor->driver) {
+        Driver_Disable(FOC_Motor->driver);
+    }
+
+    //更新状态把 enabled = 0
     enabled = 0;
 }
 
@@ -105,7 +116,8 @@ PID_current_d
 把 enabled = 1
 
 */
-void enable()
+void enable(void)
+
 {
 
 }

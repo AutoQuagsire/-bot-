@@ -52,7 +52,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     System/INT.c
     Hardware/as5047p.c
     Hardware/FOC.c
-    Hardware/current_sense.c
+    Hardware/SimpleFOC_Learning/current_sense.c
     Hardware/Filter.c
 )
 

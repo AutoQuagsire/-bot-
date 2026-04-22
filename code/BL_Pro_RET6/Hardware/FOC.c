@@ -153,7 +153,7 @@ void Init_CunrrentCfg(CurrentConfig_t *CurrentCfg, float OFFSETA, float OFFSETB,
  * @brief  Calibrate ADC offset and calculate current conversion gain
  *         (ADC DMA must be already started by FOC_ADC_Start())
  */
-void CurrentSense_Init() 
+void CurrentSense_Init(void)
 {
     USB_Debug_Printf("=== START CurrentSense_Init ===\r\n");
     /* Ensure ADC DMA / TIM2 trigger are stopped before calibration */

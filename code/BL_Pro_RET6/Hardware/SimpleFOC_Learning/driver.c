@@ -1,5 +1,7 @@
 #include "driver.h"
 #include "BLDCMotor.h"
+#include "stm32g4xx_hal_tim.h"
+#include <string.h>
 
 
 Driver_t *driver;
@@ -21,25 +23,26 @@ static void DriverTIM_WriteCompare(Driver_t *m, uint32_t phA, uint32_t phB, uint
 void Driver_SetPwm(Driver_t *driver, float ua, float ub, float uc)
 {
     if (!driver) return;
+    (void)ua; (void)ub; (void)uc;
 
-    // 这里先写你真正的三相PWM输出代码
-    // 比如：
+    // TODO: 在此实现三相 PWM 输出。
+    // 例如：
     // SVPWM_SetPhaseVoltage(ua, ub, uc);
-    // 或者 TIM CCR 更新
+    // 或者更新 TIM CCR 寄存器
 
 
 }
 
 
-void Driver_Disable(Driver_t *driver, float ua, float ub, float uc)
+void Driver_Disable(Driver_t *driver)
 {
     if (!driver) return;
 
-    //先终止能量
-    DriverTIM_WriteCompare(driver, (uint32_t)(ua), (uint32_t)(ub), (uint32_t)(uc));
-    //再关闭驱动
-    Driver_Disable();
+    // 先终止能量：把比较值置零
+    DriverTIM_WriteCompare(driver, 0, 0, 0);
+    // 再关闭驱动
+    DRIVER_DISABLE();
 
-    //改变状态
+    // 改变状态
     driver->enabled = 0;
 }
