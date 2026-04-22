@@ -80,6 +80,8 @@ typedef struct {
 } MotorState_t;
 
 
+
+
 //==================== 电机总对象 ====================
 // 这是电机控制对象的总结构体
 // 包含：参数、配置、状态，以及与外部模块的连接关系
@@ -90,6 +92,11 @@ typedef struct {
 
     Driver_t *driver;               // 指向驱动模块
     CurrentSense_t *current_sense;  // 指向电流采样模块
+    Sensor_t *sensor;               // 指向磁传感器模块
+
+    float electrical_angle;         // 当前电机电角度（单位：弧度）
+    float zero_electrical_angle;    // 零位电角度（单位：弧度）
+
 } Motor_t;
 
 
