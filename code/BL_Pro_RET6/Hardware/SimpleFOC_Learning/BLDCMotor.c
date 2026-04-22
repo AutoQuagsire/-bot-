@@ -1,7 +1,7 @@
 #include "./BLDCMotor.h"
 #include "./driver.h"
 #include "./current_sense.h"
-#include "stm32g4xx_hal.h"
+#include "./platform.h"
 
 
 
@@ -102,9 +102,9 @@ uint8_t FOCMotor_init(Motor_t *FOC_Motor)
     }
 
     //（7）延时 -> 使能 -> 延时 -> 状态置为未校准
-    HAL_Delay(10);
+    Platform_DelayMs(10);
     FOCMotor_enable(FOC_Motor);
-    HAL_Delay(10);
+    Platform_DelayMs(10);
     FOC_Motor->state.motor_status = motor_uncalibrated;
 
 
