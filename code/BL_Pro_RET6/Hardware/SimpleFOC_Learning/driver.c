@@ -4,7 +4,9 @@
 #include <string.h>
 
 
-Driver_t *driver;
+/* Global driver instances */
+static Driver_t g_drivers[2] = {0};  /* [0]=LEFT, [1]=RIGHT */
+Driver_t *driver = NULL;  /* Legacy pointer, use Driver_GetInstance instead */
 
 
 
@@ -29,7 +31,7 @@ void Driver_SetPwm(Driver_t *driver, float ua, float ub, float uc)
     // 例如：
     // SVPWM_SetPhaseVoltage(ua, ub, uc);
     // 或者更新 TIM CCR 寄存器
-
+    DriverTIM_WriteCompare(driver, (uint32_t)(ua), (uint32_t)(ub), (uint32_t)(uc));
 
 }
 
@@ -45,4 +47,27 @@ void Driver_Disable(Driver_t *driver)
 
     // 改变状态
     driver->enabled = 0;
+}
+
+
+void Driver_Init(Driver_t *driver, TIM_HandleTypeDef *htim,
+                 uint32_t chA, uint32_t chB, uint32_t chC,
+                 float voltage_limit)
+{
+    if (!driver || !htim) return;
+
+    driver->htim = htim;
+    driver->chA = chA;
+    driver->chB = chB;
+    driver->chC = chC;
+    driver->voltage_limit = voltage_limit;
+    driver->enabled = 0;
+    driver->initialized = 1;
+}
+
+
+Driver_t* Driver_GetInstance(DriverSide_t side)
+{
+    if (side >= 2) return NULL;
+    return &g_drivers[side];
 }
