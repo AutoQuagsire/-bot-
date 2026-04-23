@@ -94,3 +94,39 @@ AS5047P_Status_t AS5047P_ClearErrorFlag(AS5047P_Handle_t *dev)
     uint16_t dummy;
     return as5047p_read_register16(dev, AS5047P_REG_ERRFL, &dummy);
 }
+
+
+uint8_t AS5047P_RW_Init(AS5047P_Handle_t *dev,
+                     SPI_HandleTypeDef *hspi,
+                     GPIO_TypeDef *cs_port,
+                     uint16_t cs_pin)
+{
+    if (!dev || !hspi || !cs_port) {
+        return 0U;
+    }
+
+    /* 1. 绑定硬件资源 */
+    dev->hspi = hspi;
+    dev->cs_port = cs_port;
+    dev->cs_pin = cs_pin;
+
+    /* 2. 清零运行状态 */
+    dev->initialized = 0U;
+    dev->errorflag = 0U;
+    dev->raw_angle = 0U;
+    dev->angle_rad = 0.0f;
+
+    /* 3. 先确保 CS 为空闲态 */
+    HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
+
+    /* 4. 做一次基础读角测试，确认 SPI 链路可用 */
+    uint16_t raw = 0U;
+    AS5047P_Status_t st = AS5047P_ReadRawAngle(dev, &raw);
+    if (st != AS5047P_OK) {
+        return 0U;
+    }
+
+    /* 5. 到这里说明设备基本可通信 */
+    dev->initialized = 1U;
+    return 1U;
+}

@@ -35,7 +35,7 @@ typedef struct {
 
 
 
-uint8_t AS5047P_Init(AS5047P_Handle_t *dev,
+uint8_t AS5047P_RW_Init(AS5047P_Handle_t *dev,
                      SPI_HandleTypeDef *hspi,
                      GPIO_TypeDef *cs_port,
                      uint16_t cs_pin);

@@ -18,7 +18,6 @@
 
 #include "INT.h"
 #include "FOC.h"
-#include "as5047p.h"
 #include "Filter.h"
 #include "usb_debug.h"
 

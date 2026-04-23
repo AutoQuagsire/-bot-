@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "driver.h"
 #include "current_sense.h"
+#include "sensor.h"
 
 //==================== 电机物理参数 ====================
 // 这部分存放“电机本体参数”

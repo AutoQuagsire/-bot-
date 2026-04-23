@@ -31,6 +31,6 @@ uint8_t CurrentSense_Init(CurrentSense_t *cs);
 void CurrentSense_Enable(CurrentSense_t *cs);
 void CurrentSense_Disable(CurrentSense_t *cs);
 void CurrentSense_CalibrateOffsets(CurrentSense_t *cs);
-PhaseCurrent CurrentSense_GetPhaseCurrents(CurrentSense_t *cs);
+//PhaseCurrent CurrentSense_GetPhaseCurrents(CurrentSense_t *cs);
 #endif /* CURRENT_SENSE_H */
 

@@ -53,6 +53,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Hardware/as5047p.c
     Hardware/FOC.c
     Hardware/SimpleFOC_Learning/current_sense.c
+    Hardware/SimpleFOC_Learning/AS5047P_RW.c
+    Hardware/SimpleFOC_Learning/sensor.c
+    Hardware/SimpleFOC_Learning/driver.c
+    Hardware/SimpleFOC_Learning/platform.c
+    Hardware/SimpleFOC_Learning/BLDCMotor.c
     Hardware/Filter.c
 )
 
@@ -61,6 +66,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
     System
     Hardware
+    Hardware/SimpleFOC_Learning
 )
 
 # Generate map file
