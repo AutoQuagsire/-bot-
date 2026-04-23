@@ -15,6 +15,12 @@ void linkDriver(Driver_t *driver, Motor_t *motor)
     motor->driver = driver;
 }
 
+//预留代码：实现功能：把一个传感器对象的指针，挂到电机对象上
+void linkSensor(Sensor_t *sensor, Motor_t *motor)
+{
+    if (!sensor || !motor) return;
+    motor->sensor = sensor;
+}
 
 
 //预留代码，实现功能：电机硬件可用性检查 + 参数约束整理 + 进入可使能状态
