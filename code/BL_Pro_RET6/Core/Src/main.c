@@ -109,30 +109,51 @@ int main(void)
 
 HAL_Delay(1000);
 
-
 AS5047P_Handle_t enc1;
 Sensor_t sensor1;
+Motor_t motor1 = {0};
 
 if (AS5047P_RW_Init(&enc1, &hspi3, EcdL_CS_GPIO_Port, EcdL_CS_Pin)) {
 
     Sensor_LinkAS5047P(&enc1, &sensor1);
 
     if (Sensor_Init(&sensor1)) {
-        USB_Debug_Printf("Sensor_Init ok, init_angle=%.6f\r\n", sensor1.init_angle);
 
-        while (1) {
-            Sensor_Update(&sensor1, 0.01f);   // 先假设 10ms
-            USB_Debug_Printf("angle=%.6f, track=%.6f, vel=%.6f\r\n",
-                   sensor1.data.shaft_angle,
-                   sensor1.data.shaft_angle_track,
-                   sensor1.data.shaft_velocity);
-            HAL_Delay(10);
+      Driver_t *driver1 = Driver_GetInstance(DRIVER_LEFT);
+      Driver_Init(driver1, 
+                  &htim1,                    // TIM1 用于左路 PWM
+                  TIM_CHANNEL_1,             // A 相
+                  TIM_CHANNEL_3,             // B 相
+                  TIM_CHANNEL_4,             // C 相
+                  19*0.577f);  
+
+
+      MotorParam_Init(&motor1, 14.0f, 10.3f, 0.0f, 0.0f, 0.0f); // 14极对
+        motor1.zero_electrical_angle = 0.0f;
+        motor1.state.sensor_direction = sensor_direction_cw;
+
+        linkSensor(&sensor1, &motor1);
+        linkDriver(driver1, &motor1);   // 你自己的 driver 对象
+
+
+
+
+        if (Motor_CalibrateZeroElectricalAngle(&motor1, 2.0f, 3.0f * PI / 2.0f, 300)) {
+        USB_Debug_Printf("zero_elec = %.6f\r\n", motor1.zero_electrical_angle);
+        } else {
+            USB_Debug_Printf("calibration failed\r\n");
         }
-    } else {
-        printf("Sensor_Init failed\r\n");
+        // while (1) {
+        //     Motor_UpdateSensor(&motor1, 0.01f);
+
+        //     USB_Debug_Printf("mech=%.6f, elec=%.6f\r\n",
+        //                      Sensor_GetAngle(&sensor1),
+        //                      motor1.electrical_angle);
+
+        //     HAL_Delay(10);
+        // }
     }
 }
-
 
   /* USER CODE END 2 */
 

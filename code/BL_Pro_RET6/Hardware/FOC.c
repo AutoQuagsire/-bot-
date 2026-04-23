@@ -58,6 +58,9 @@ static void Motor_WriteCompare(const FOC_Motor_t *m, uint32_t phA, uint32_t phB,
     __HAL_TIM_SET_COMPARE(m->htim, m->chC, phC);
 }
 
+
+
+
 __attribute__((optimize("O2,fast-math")))
 void FOC_SetSVPWM(FOC_Motor_t *motor, float Uq, float sint, float cost, float Ud)
 {

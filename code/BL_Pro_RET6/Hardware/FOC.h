@@ -66,6 +66,11 @@ typedef struct {
     float Ubeta;
 } FOC_Motor_t;
 
+
+
+
+
+
 typedef struct {
     MotorSide_t side;
     int8_t A_SIGN;

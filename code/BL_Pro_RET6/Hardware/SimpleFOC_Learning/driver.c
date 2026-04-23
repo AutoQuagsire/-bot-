@@ -2,6 +2,7 @@
 #include "BLDCMotor.h"
 #include "stm32g4xx_hal_tim.h"
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 
 
@@ -90,7 +91,9 @@ void Driver_LinkHardware(Driver_t *driver, TIM_HandleTypeDef *htim,
 
 
 
-uint8_t Driver_Init(Driver_t *driver)
+uint8_t Driver_Init(Driver_t *driver, TIM_HandleTypeDef *htim,
+                 uint32_t chA, uint32_t chB, uint32_t chC,
+                 float voltage_limit)
 {
     if (!driver || !driver->htim) return 0;
 

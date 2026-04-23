@@ -7,6 +7,8 @@
 #include "current_sense.h"
 #include "sensor.h"
 
+
+
 //==================== 电机物理参数 ====================
 // 这部分存放“电机本体参数”
 // 一般由电机规格、测量结果或辨识得到，运行过程中通常不会频繁修改
@@ -102,8 +104,21 @@ typedef struct {
 
 
 void linkDriver(Driver_t *driver, Motor_t *motor);
+void linkSensor(Sensor_t *sensor, Motor_t *motor);
+
 uint8_t FOCMotor_init(Motor_t *FOC_Motor);
+void MotorParam_Init(Motor_t *motor, float pole_pairs, float phase_resistance, 
+                    float kv, float Ld, float Lq);
 void FOCMotor_disable(Motor_t *FOC_Motor);
 void FOCMotor_enable(Motor_t *FOC_Motor);
+
+float Motor_GetMechanicalAngle(Motor_t *motor);
+float Motor_GetElectricalAngle(Motor_t *motor);
+uint8_t Motor_UpdateSensor(Motor_t *motor, float dt);
+
+uint8_t Motor_CalibrateZeroElectricalAngle(Motor_t *motor,
+                                           float align_voltage,
+                                           float align_angle,
+                                           uint16_t settle_ms);
 
 #endif
