@@ -30,7 +30,7 @@ typedef struct {
     uint8_t velocity_ready;   // 是否已经建立速度估计参考
     SensorType_t type;
     void *dev;
-
+    uint8_t test;
     SensorData_t data;
 
     float init_angle;         // init阶段读到的初始机械角
