@@ -116,7 +116,7 @@ int main(void)
 
   HAL_Delay(500);
   App_FOCStack_Init();
-
+  App_StartupCalibrate();
 
   /* USER CODE END 2 */
 
