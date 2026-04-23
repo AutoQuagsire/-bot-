@@ -1,27 +1,56 @@
 #ifndef SENSOR_H
 #define SENSOR_H
 
-#include <stdint.h>
+
+#include "main.h"
 #include "AS5047P_RW.h"
 
 
 
+
+/* 传感器类型 */
+typedef enum {
+    SENSOR_NONE = 0,
+    SENSOR_AS5047P,
+    SENSOR_AS5600,     // 预留
+} SensorType_t;
+
+
+/* 传感器公共输出数据 */
 typedef struct {
-    float shaft_angle;
-    float shaft_velocity;
+    float shaft_angle;         // 单圈机械角 [0, 2pi)
+    float shaft_angle_track;   // 连续机械角
+    float shaft_velocity;      // 机械角速度 [rad/s]
 } SensorData_t;
 
+
+/* 统一传感器对象 */
 typedef struct {
-    uint8_t initialized;
-    AS5047P_Handle_t *as5047p_dev;
+    uint8_t initialized;      // sensor模块是否初始化完成
+    uint8_t velocity_ready;   // 是否已经建立速度估计参考
+    SensorType_t type;
+    void *dev;
+
     SensorData_t data;
-    
+
+    float init_angle;         // init阶段读到的初始机械角
+    float last_angle;         // 上一次update用于速度计算的角度
+    float last_angle_track;   // 上一次连续角
 } Sensor_t;
 
 
+/* 绑定具体传感器 */
+void Sensor_LinkAS5047P( AS5047P_Handle_t *dev,Sensor_t *sensor);
+
+/* 初始化 */
 uint8_t Sensor_Init(Sensor_t *sensor);
-void Sensor_Update(Sensor_t *sensor);
+
+/* 周期更新，dt单位：秒 */
+void Sensor_Update(Sensor_t *sensor, float dt);
+
+/* 获取公共数据 */
 float Sensor_GetAngle(Sensor_t *sensor);
+float Sensor_GetAngleTrack(Sensor_t *sensor);
 float Sensor_GetVelocity(Sensor_t *sensor);
 
 #endif
