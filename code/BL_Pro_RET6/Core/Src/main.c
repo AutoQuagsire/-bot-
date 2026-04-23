@@ -31,6 +31,7 @@
 #include "AS5047P_RW.h"
 #include "sensor.h"
 #include "BLDCMotor.h"
+#include "app_foc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,11 +49,17 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
+
+
+
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -107,53 +114,9 @@ int main(void)
   MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
 
-HAL_Delay(1000);
+  HAL_Delay(500);
+  App_FOCStack_Init();
 
-AS5047P_Handle_t enc1;
-Sensor_t sensor1;
-Motor_t motor1 = {0};
-
-if (AS5047P_RW_Init(&enc1, &hspi3, EcdL_CS_GPIO_Port, EcdL_CS_Pin)) {
-
-    Sensor_LinkAS5047P(&enc1, &sensor1);
-
-    if (Sensor_Init(&sensor1)) {
-
-      Driver_t *driver1 = Driver_GetInstance(DRIVER_LEFT);
-      Driver_Init(driver1, 
-                  &htim1,                    // TIM1 用于左路 PWM
-                  TIM_CHANNEL_1,             // A 相
-                  TIM_CHANNEL_3,             // B 相
-                  TIM_CHANNEL_4,             // C 相
-                  19*0.577f);  
-
-
-      MotorParam_Init(&motor1, 14.0f, 10.3f, 0.0f, 0.0f, 0.0f); // 14极对
-        motor1.zero_electrical_angle = 0.0f;
-        motor1.state.sensor_direction = sensor_direction_cw;
-
-        linkSensor(&sensor1, &motor1);
-        linkDriver(driver1, &motor1);   // 你自己的 driver 对象
-
-
-
-
-        if (Motor_CalibrateZeroElectricalAngle(&motor1, 2.0f, 3.0f * PI / 2.0f, 300)) {
-        USB_Debug_Printf("zero_elec = %.6f\r\n", motor1.zero_electrical_angle);
-        } else {
-            USB_Debug_Printf("calibration failed\r\n");
-        }
-        // while (1) {
-        //     Motor_UpdateSensor(&motor1, 0.01f);
-
-        //     USB_Debug_Printf("mech=%.6f, elec=%.6f\r\n",
-        //                      Sensor_GetAngle(&sensor1),
-        //                      motor1.electrical_angle);
-
-        //     HAL_Delay(10);
-        // }
-    }
-}
 
   /* USER CODE END 2 */
 
