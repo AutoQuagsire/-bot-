@@ -1,4 +1,19 @@
 #include "sensor.h"
+#include "as5047p_rw.h"
+
+
+
+AS5047P_Handle_t *as5047p_left;
+
+
+Sensor_LinkAS5047P( AS5047P_Handle_t *dev,Sensor_t *sensor)
+{
+
+    if (!dev || !sensor) return;
+
+    sensor->as5047p_dev = dev;
+   
+}
 
 uint8_t Sensor_Init(Sensor_t *sensor)
 {

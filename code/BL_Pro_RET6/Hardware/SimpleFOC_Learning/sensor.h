@@ -2,6 +2,9 @@
 #define SENSOR_H
 
 #include <stdint.h>
+#include "AS5047P_RW.h"
+
+
 
 typedef struct {
     float shaft_angle;
@@ -10,7 +13,9 @@ typedef struct {
 
 typedef struct {
     uint8_t initialized;
+    AS5047P_Handle_t *as5047p_dev;
     SensorData_t data;
+    
 } Sensor_t;
 
 

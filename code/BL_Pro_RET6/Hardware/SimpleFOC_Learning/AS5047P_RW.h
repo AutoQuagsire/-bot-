@@ -31,6 +31,9 @@ typedef struct {
     uint16_t raw_angle;
     float angle_rad;
 } AS5047P_Handle_t;
+ 
+
+
 
 uint8_t AS5047P_Init(AS5047P_Handle_t *dev,
                      SPI_HandleTypeDef *hspi,
