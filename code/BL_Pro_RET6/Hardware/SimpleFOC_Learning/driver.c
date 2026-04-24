@@ -95,10 +95,16 @@ uint8_t Driver_Init(Driver_t *driver, TIM_HandleTypeDef *htim,
                  uint32_t chA, uint32_t chB, uint32_t chC,
                  float voltage_limit)
 {
-    if (!driver || !driver->htim) return 0;
+    if (!driver || !htim) return 0;
 
     driver->initialized = 0;
     driver->enabled = 0;
+
+    driver->htim  = htim;
+    driver->chA   = chA;
+    driver->chB   = chB;
+    driver->chC   = chC;
+    driver->voltage_limit = voltage_limit;
 
     if (HAL_TIM_PWM_Start(driver->htim, driver->chA) != HAL_OK) return 0;
     if (HAL_TIM_PWM_Start(driver->htim, driver->chB) != HAL_OK) return 0;

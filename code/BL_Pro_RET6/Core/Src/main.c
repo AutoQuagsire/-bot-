@@ -115,8 +115,13 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   HAL_Delay(500);
-  App_FOCStack_Init();
-  App_StartupCalibrate();
+  if (!App_FOCStack_Init()) {
+      Error_Handler();
+  }
+
+  if (!App_StartupCalibrate()) {
+      Error_Handler();
+  }
 
   /* USER CODE END 2 */
 
@@ -126,7 +131,7 @@ int main(void)
   {
     
     /* USER CODE END WHILE */
-
+    App_Loop();
     /* USER CODE BEGIN 3 */
 
 

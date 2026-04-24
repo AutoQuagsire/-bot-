@@ -329,6 +329,11 @@ static void Motor_ApplyAlignVector(Motor_t *motor, float uq, float elec_angle)
     BLDC_SetFVPWM(motor, uq, elec_angle);
 }
 
+void Motor_SetPhaseVoltageQ(Motor_t *motor, float uq, float elec_angle)
+{
+    BLDC_SetFVPWM(motor, uq, elec_angle);
+}
+
 
 uint8_t Motor_CalibrateZeroElectricalAngle(Motor_t *motor,
                                            float align_voltage,

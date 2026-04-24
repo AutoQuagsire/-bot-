@@ -5,7 +5,7 @@
 #include "main.h"
 #include "AS5047P_RW.h"
 
-
+#define SENSOR_UPDATE_PERIOD_S  0.0001f   // 例如 10 kHz
 
 
 /* 传感器类型 */

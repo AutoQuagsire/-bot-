@@ -115,6 +115,7 @@ void FOCMotor_enable(Motor_t *FOC_Motor);
 float Motor_GetMechanicalAngle(Motor_t *motor);
 float Motor_GetElectricalAngle(Motor_t *motor);
 uint8_t Motor_UpdateSensor(Motor_t *motor, float dt);
+void Motor_SetPhaseVoltageQ(Motor_t *motor, float uq, float elec_angle);
 
 uint8_t Motor_CalibrateZeroElectricalAngle(Motor_t *motor,
                                            float align_voltage,

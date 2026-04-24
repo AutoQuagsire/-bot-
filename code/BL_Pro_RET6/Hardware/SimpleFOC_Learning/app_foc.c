@@ -20,6 +20,11 @@ static AS5047P_Handle_t g_enc1;     // AS5047P 底层驱动句柄
 static Sensor_t         g_sensor1;  // 传感器公共层对象
 static Motor_t          g_motor1;   // 电机控制对象
 static Driver_t        *g_driver1 = NULL; // 三相驱动对象（由 Driver 模块提供实例）
+static uint32_t         g_last_loop_tick_ms = 0U;
+static uint32_t         g_last_print_tick_ms = 0U;
+
+#define APP_LOOP_TEST_UQ_V        (1.0f)
+#define APP_LOOP_PRINT_PERIOD_MS  (100U)
 
 /**
  * @brief  FOC 应用层对象初始化
@@ -120,7 +125,7 @@ uint8_t App_StartupCalibrate(void)
      * - 3.0f * PI / 2.0f     : 对齐目标电角度（3π/2）
      * - 300                  : 对齐稳定等待时间，单位 ms
      */
-    if (!Motor_CalibrateZeroElectricalAngle(&g_motor1, 2.0f, 3.0f * PI / 2.0f, 300)) {
+    if (!Motor_CalibrateZeroElectricalAngle(&g_motor1, 4.0f, 3.0f * PI / 2.0f, 300)) {
         USB_Debug_Printf("Startup calibrate failed\r\n");
         return 0U;
     }
@@ -142,5 +147,32 @@ uint8_t App_StartupCalibrate(void)
  */
 void App_Loop(void)
 {
-    // 先留空，后续逐步加
+    uint32_t now_ms = HAL_GetTick();
+    if (g_last_loop_tick_ms == 0U) {
+        g_last_loop_tick_ms = now_ms;
+        return;
+    }
+
+    uint32_t dt_ms = now_ms - g_last_loop_tick_ms;
+    if (dt_ms == 0U) {
+        return;
+    }
+    g_last_loop_tick_ms = now_ms;
+
+    float dt = (float)dt_ms * 0.001f;
+    if (!Motor_UpdateSensor(&g_motor1, dt)) {
+        return;
+    }
+
+    // 最小链路：传感器角度 -> 电角度 -> q轴测试电压输出
+    float test_elec_angle = g_motor1.electrical_angle + (PI * 0.5f);
+    Motor_SetPhaseVoltageQ(&g_motor1, APP_LOOP_TEST_UQ_V, test_elec_angle);
+
+    if ((now_ms - g_last_print_tick_ms) >= APP_LOOP_PRINT_PERIOD_MS) {
+        g_last_print_tick_ms = now_ms;
+        USB_Debug_Printf("mech=%.4f elec=%.4f vel=%.3f\r\n",
+                         Sensor_GetAngle(&g_sensor1),
+                         g_motor1.electrical_angle,
+                         Sensor_GetVelocity(&g_sensor1));
+    }
 }
