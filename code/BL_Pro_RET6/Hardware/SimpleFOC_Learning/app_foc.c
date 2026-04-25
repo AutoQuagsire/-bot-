@@ -68,6 +68,10 @@ static uint8_t          g_speed_fault2 = 0U;
 #define APP_SPEED_I_ERR_MIN        (0.05f)
 #define APP_SPEED_I_SEP_RATIO      (0.75f)
 #define APP_SPEED_VEL_FAULT_ABS    (80.0f)
+#define APP_MOVE_DOWNSAMPLE        (1U)
+#if (APP_MOVE_DOWNSAMPLE < 1U)
+#error "APP_MOVE_DOWNSAMPLE must be >= 1"
+#endif
 
 #define APP_MATRIX_ENABLE          (0U)
 #define APP_MATRIX_LEVEL_COUNT     (3U)
@@ -510,66 +514,63 @@ void App_FOCControlIT_Enable(void)
 float vel1 = 0;
 float vel_windowed1 = 0;
 float vel_windowed_f1 = 0;
-float uq_cmd1 = 0.0f;
+float uq_cmd1 = APP_LOOP_TEST_UQ_V;
 
 float vel2 = 0;
 float vel_windowed2 = 0;
 float vel_windowed_f2 = 0;
-float uq_cmd2 = 0.0f;
-//10Khz中断内部程序
-void App_LoopForIT(void)
-{
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+float uq_cmd2 = APP_LOOP_TEST_UQ_V;
+static uint16_t g_move_downsample_cnt = 0U;
 
-    if (!Motor_UpdateSensor(&g_motor1, 0.0001f )) {
-        return;
+static uint8_t loopFOC(void)
+{
+    if (!Motor_UpdateSensor(&g_motor1, FOC_PERIOD_S)) {
+        return 0U;
     }
 
-    float elec_angle1 = g_motor1.electrical_angle ;
-    uq_cmd1 = APP_LOOP_TEST_UQ_V;
+    if (!Motor_UpdateSensor(&g_motor2, FOC_PERIOD_S)) {
+        return 0U;
+    }
+
+    {
+        float sin_e1 = 0.0f;
+        float cos_e1 = 0.0f;
+        float sin_e2 = 0.0f;
+        float cos_e2 = 0.0f;
+
+        Get_SinCos(g_motor1.electrical_angle, &sin_e1, &cos_e1);
+        Get_SinCos(g_motor2.electrical_angle, &sin_e2, &cos_e2);
+
+        Motor_SetPhaseVoltageQBySinCos(&g_motor1, uq_cmd1, sin_e1, cos_e1);
+        Motor_SetPhaseVoltageQBySinCos(&g_motor2, uq_cmd2, sin_e2, cos_e2);
+    }
+
+    return 1U;
+}
+
+static void move(void)
+{
     float vel_target1 = Left_Target;
+    float vel_target2 = Left_Target;
+
     vel1 = Sensor_GetVelocityRaw(&g_sensor1);
     vel_windowed1 = Sensor_GetVelocityWindowed(&g_sensor1);
     vel_windowed_f1 = LowPassFilter_Update(&g_speed_lpf1, vel1);
 
-
-    if (!Motor_UpdateSensor(&g_motor2, 0.0001f )) {
-        return;
-    }
-    float elec_angle2 = g_motor2.electrical_angle ;
-    uq_cmd2 = APP_LOOP_TEST_UQ_V;
-    float vel_target2 = Left_Target;
     vel2 = Sensor_GetVelocityRaw(&g_sensor2);
     vel_windowed2 = Sensor_GetVelocityWindowed(&g_sensor2);
     vel_windowed_f2 = LowPassFilter_Update(&g_speed_lpf2, vel2);
 
+#if APP_SPEED_LOOP_ENABLE
+    PID_Calculate(&g_speed_pid1, vel_target1, vel_windowed_f1, 0U);
+    uq_cmd1 = g_speed_pid1.output;
 
-    #if APP_SPEED_LOOP_ENABLE
-
-
-
-            PID_Calculate(&g_speed_pid1, vel_target1, vel_windowed_f1, 0U);
-            uq_cmd1 = g_speed_pid1.output;
-
-            PID_Calculate(&g_speed_pid2, vel_target2, vel_windowed_f2, 0U);
-            uq_cmd2 = g_speed_pid2.output;
-
-
-
-
-    #endif
-
-
-    float sin_e1 = 0.0f;
-    float cos_e1 = 0.0f;
-    Get_SinCos(elec_angle1, &sin_e1, &cos_e1);
-
-    float sin_e2 = 0.0f;
-    float cos_e2 = 0.0f;
-    Get_SinCos(elec_angle2, &sin_e2, &cos_e2);
-
-    Motor_SetPhaseVoltageQBySinCos(&g_motor1, uq_cmd1, sin_e1, cos_e1);
-    Motor_SetPhaseVoltageQBySinCos(&g_motor2, uq_cmd2, sin_e2, cos_e2);
+    PID_Calculate(&g_speed_pid2, vel_target2, vel_windowed_f2, 0U);
+    uq_cmd2 = g_speed_pid2.output;
+#else
+    uq_cmd1 = APP_LOOP_TEST_UQ_V;
+    uq_cmd2 = APP_LOOP_TEST_UQ_V;
+#endif
 
     Left_Velocity_FOC_PID = g_speed_pid1;
     pid_csv_data.timestamp_ms = HAL_GetTick();
@@ -580,7 +581,24 @@ void App_LoopForIT(void)
     pid_csv_data.p_term = g_speed_pid1.Kp * pid_csv_data.error;
     pid_csv_data.i_term = g_speed_pid1.Ki * g_speed_pid1.error_integral;
     pid_csv_data.d_term = g_speed_pid1.Kd * (pid_csv_data.error - g_speed_pid1.last_error);
+}
+//10Khz中断内部程序
+void App_LoopForIT(void)
+{
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+
+    if (!loopFOC()) {
         HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+        return;
+    }
+
+    g_move_downsample_cnt++;
+    if (g_move_downsample_cnt >= APP_MOVE_DOWNSAMPLE) {
+        g_move_downsample_cnt = 0U;
+        move();
+    }
+
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
 
 }
 

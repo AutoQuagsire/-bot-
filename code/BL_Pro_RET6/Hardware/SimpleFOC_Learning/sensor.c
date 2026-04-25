@@ -1,10 +1,4 @@
 #include "sensor.h"
-#include "stm32g4xx_hal_gpio.h"
-#include <math.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846f
-#endif
 
 #define PI                  3.14159265359f
 #define TWO_PI              (2.0f * PI)
@@ -17,7 +11,6 @@
 #define SENSOR_OPTIMIZE
 #endif
 
-/* Wrap to shortest delta in (-pi, pi] */
 static SENSOR_OPTIMIZE float angle_diff(float now, float last)
 {
     float diff = now - last;
@@ -29,8 +22,6 @@ static SENSOR_OPTIMIZE float angle_diff(float now, float last)
     return diff;
 }
 
-AS5047P_Handle_t *as5047p_left;
-
 void Sensor_LinkAS5047P(AS5047P_Handle_t *dev, Sensor_t *sensor)
 {
     if (!dev || !sensor) return;
@@ -38,25 +29,30 @@ void Sensor_LinkAS5047P(AS5047P_Handle_t *dev, Sensor_t *sensor)
     sensor->type = SENSOR_AS5047P;
     sensor->dev = (void *)dev;
     sensor->initialized = 0U;
+    sensor->velocity_ready = 0U;
 
     sensor->data.shaft_angle = 0.0f;
-    sensor->data.shaft_angle_track = 0.0f;
     sensor->data.shaft_velocity = 0.0f;
     sensor->data.shaft_velocity_windowed = 0.0f;
-    sensor->data.rotations = 0;
 
     sensor->last_angle = 0.0f;
-    sensor->last_angle_track = 0.0f;
-    sensor->velocity_ready = 0U;
+    sensor->angle_track = 0.0f;
+    sensor->rotations = 0;
+
+    sensor->velocity_windowed.vel_win_head = 0U;
+    sensor->velocity_windowed.vel_win_count = 0U;
+    for (uint16_t i = 0U; i < SENSOR_VEL_WIN_MAX; i++) {
+        sensor->velocity_windowed.vel_angle_track_buf[i] = 0.0f;
+    }
 }
 
 uint8_t Sensor_Init(Sensor_t *sensor)
 {
-    if (!sensor || !sensor->dev) return 0;
+    if (!sensor || !sensor->dev) return 0U;
 
     sensor->velocity_ready = 0U;
     sensor->data.shaft_velocity = 0.0f;
-    sensor->data.shaft_angle_track = 0.0f;
+    sensor->data.shaft_velocity_windowed = 0.0f;
 
     switch (sensor->type) {
     case SENSOR_AS5047P:
@@ -64,21 +60,18 @@ uint8_t Sensor_Init(Sensor_t *sensor)
         AS5047P_Handle_t *dev = (AS5047P_Handle_t *)sensor->dev;
         uint16_t raw = 0U;
 
-        if (!dev->initialized) return 0;
-        if (AS5047P_ReadRawAngle(dev, &raw) != AS5047P_OK) return 0;
-        (void)raw;
+        if (!dev->initialized) return 0U;
+        if (AS5047P_ReadRawAngle(dev, &raw) != AS5047P_OK) return 0U;
 
-        float angle = dev->angle_rad;
-        sensor->init_angle = angle;
-        sensor->data.shaft_angle = angle;
-        sensor->last_angle = angle;
-        sensor->last_angle_track = angle;
+        sensor->data.shaft_angle = dev->angle_rad;
+        sensor->last_angle = dev->angle_rad;
+        sensor->angle_track = dev->angle_rad;
+        sensor->rotations = 0;
         sensor->initialized = 1U;
-        return 1;
+        return 1U;
     }
-
     default:
-        return 0;
+        return 0U;
     }
 }
 
@@ -98,30 +91,26 @@ void Sensor_Update(Sensor_t *sensor, float dt)
     sensor->data.shaft_angle = angle_now;
 
     float d_rad = angle_diff(angle_now, sensor->last_angle);
-    float angle_track = sensor->last_angle_track + d_rad;
-    sensor->data.shaft_angle_track = angle_track;
-    int rotations = sensor->data.rotations;
-    float rotation_base = (float)rotations * TWO_PI;
-    if (angle_track >= (rotation_base + TWO_PI)) {
-        rotations++;
-    } else if (angle_track <= (rotation_base - TWO_PI)) {
-        rotations--;
+    sensor->angle_track += d_rad;
+
+    float rotation_base = (float)sensor->rotations * TWO_PI;
+    if (sensor->angle_track >= (rotation_base + TWO_PI)) {
+        sensor->rotations++;
+    } else if (sensor->angle_track <= (rotation_base - TWO_PI)) {
+        sensor->rotations--;
     }
-    sensor->data.rotations = rotations;
 
     if (!sensor->velocity_ready) {
         sensor->data.shaft_velocity = 0.0f;
         sensor->last_angle = angle_now;
-        sensor->last_angle_track = angle_track;
         sensor->velocity_ready = 1U;
 
         for (uint16_t i = 0U; i < SENSOR_VEL_WIN_MAX; i++) {
-            sensor->velocity_windowed.vel_angle_track_buf[i] = angle_track;
+            sensor->velocity_windowed.vel_angle_track_buf[i] = sensor->angle_track;
         }
 
         sensor->velocity_windowed.vel_win_head = 0U;
         sensor->velocity_windowed.vel_win_count = 1U;
-        sensor->velocity_windowed.vel_win_sum_dt = 0.0f;
         return;
     }
 
@@ -131,13 +120,16 @@ void Sensor_Update(Sensor_t *sensor, float dt)
         head = 0U;
     }
     vw->vel_win_head = (uint8_t)head;
-    vw->vel_angle_track_buf[head] = angle_track;
+    vw->vel_angle_track_buf[head] = sensor->angle_track;
+
+    float inv_dt = (dt == SENSOR_UPDATE_PERIOD_S) ? SENSOR_INV_UPDATE_PERIOD_S : (1.0f / dt);
+    float vel_raw = d_rad * inv_dt;
+    sensor->data.shaft_velocity = vel_raw;
 
     if (vw->vel_win_count < SENSOR_VEL_WIN_MAX) {
         vw->vel_win_count++;
         sensor->data.shaft_velocity_windowed = 0.0f;
         sensor->last_angle = angle_now;
-        sensor->last_angle_track = angle_track;
         return;
     }
 
@@ -145,14 +137,11 @@ void Sensor_Update(Sensor_t *sensor, float dt)
     if (old_idx >= SENSOR_VEL_WIN_MAX) {
         old_idx = 0U;
     }
-
     float theta_old = vw->vel_angle_track_buf[old_idx];
-    float inv_dt = (dt == SENSOR_UPDATE_PERIOD_S) ? SENSOR_INV_UPDATE_PERIOD_S : (1.0f / dt);
+    sensor->data.shaft_velocity_windowed =
+        (sensor->angle_track - theta_old) * (INV_VEL_WIN_NUMBER * inv_dt);
 
-    sensor->data.shaft_velocity_windowed = (angle_track - theta_old) * (INV_VEL_WIN_NUMBER * inv_dt);
-    sensor->data.shaft_velocity = (angle_track - sensor->last_angle_track) * inv_dt;
     sensor->last_angle = angle_now;
-    sensor->last_angle_track = angle_track;
 }
 
 float Sensor_GetAngle(Sensor_t *sensor)
