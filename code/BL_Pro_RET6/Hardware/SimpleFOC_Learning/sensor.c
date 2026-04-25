@@ -6,31 +6,33 @@
 #define M_PI 3.14159265358979323846f
 #endif
 
-#define PI                  3.14159265359f  // 圆周率
+#define PI                  3.14159265359f
+#define TWO_PI              (2.0f * PI)
+#define INV_TWO_PI          (1.0f / TWO_PI)
+#define INV_VEL_WIN_NUMBER  (1.0f / (float)SENSOR_VEL_WIN_NUMBER)
 
-/* 角度归一化到 [0, 2pi) */
-static float normalize_angle(float angle)
-{
-   float a = angle - (float)(int32_t)(angle * (1.0f / (2.0f * PI))) * (2.0f * PI);
-    return (a >= 0.0f) ? a : (a + 2.0f * PI);
-}
+#if defined(__GNUC__) && !defined(__clang__)
+#define SENSOR_OPTIMIZE __attribute__((optimize("O2,fast-math")))
+#else
+#define SENSOR_OPTIMIZE
+#endif
 
-/* 计算最短角度差，范围压到 (-pi, pi] */
-static float angle_diff(float now, float last)
+/* Wrap to shortest delta in (-pi, pi] */
+static SENSOR_OPTIMIZE float angle_diff(float now, float last)
 {
     float diff = now - last;
-    while (diff >  PI) diff -= 2.0f * PI;
-    while (diff <= -PI) diff += 2.0f * PI;
+    if (diff > PI) {
+        diff -= TWO_PI;
+    } else if (diff <= -PI) {
+        diff += TWO_PI;
+    }
     return diff;
 }
 
-
 AS5047P_Handle_t *as5047p_left;
 
-
-void Sensor_LinkAS5047P( AS5047P_Handle_t *dev,Sensor_t *sensor)
+void Sensor_LinkAS5047P(AS5047P_Handle_t *dev, Sensor_t *sensor)
 {
-
     if (!dev || !sensor) return;
 
     sensor->type = SENSOR_AS5047P;
@@ -41,7 +43,7 @@ void Sensor_LinkAS5047P( AS5047P_Handle_t *dev,Sensor_t *sensor)
     sensor->data.shaft_angle_track = 0.0f;
     sensor->data.shaft_velocity = 0.0f;
     sensor->data.shaft_velocity_windowed = 0.0f;
-    sensor->data.rotations = 0 ;   
+    sensor->data.rotations = 0;
 
     sensor->last_angle = 0.0f;
     sensor->last_angle_track = 0.0f;
@@ -60,11 +62,13 @@ uint8_t Sensor_Init(Sensor_t *sensor)
     case SENSOR_AS5047P:
     {
         AS5047P_Handle_t *dev = (AS5047P_Handle_t *)sensor->dev;
-        float angle = 0.0f;
+        uint16_t raw = 0U;
 
         if (!dev->initialized) return 0;
-        if (AS5047P_ReadAngleRad(dev, &angle) != AS5047P_OK) return 0;
+        if (AS5047P_ReadRawAngle(dev, &raw) != AS5047P_OK) return 0;
+        (void)raw;
 
+        float angle = dev->angle_rad;
         sensor->init_angle = angle;
         sensor->data.shaft_angle = angle;
         sensor->last_angle = angle;
@@ -78,8 +82,7 @@ uint8_t Sensor_Init(Sensor_t *sensor)
     }
 }
 
-
-
+SENSOR_OPTIMIZE
 void Sensor_Update(Sensor_t *sensor, float dt)
 {
     if (!sensor || !sensor->initialized || !sensor->dev) return;
@@ -89,80 +92,65 @@ void Sensor_Update(Sensor_t *sensor, float dt)
     case SENSOR_AS5047P:
     {
         AS5047P_Handle_t *dev = (AS5047P_Handle_t *)sensor->dev;
-        float angle_now = 0.0f;
-        if (AS5047P_ReadAngleRad(dev, &angle_now) != AS5047P_OK) {
+        uint16_t raw = 0U;
+        if (AS5047P_ReadRawAngle(dev, &raw) != AS5047P_OK) {
             return;
         }
-        angle_now = normalize_angle(angle_now);
-        sensor->data.shaft_angle = angle_now;       //装载机械角(单圈)
+        (void)raw;
 
+        /* AS5047P raw->rad conversion is already in [0, 2pi). */
+        float angle_now = dev->angle_rad;
+        sensor->data.shaft_angle = angle_now;
 
         float d_rad = angle_diff(angle_now, sensor->last_angle);
-        sensor->data.shaft_angle_track = sensor->last_angle_track + d_rad;
-        sensor->data.rotations = (int)(sensor->data.shaft_angle_track / (2.0f * PI));
-        //装载机械角(带圈数)
+        float angle_track = sensor->last_angle_track + d_rad;
+        sensor->data.shaft_angle_track = angle_track;
+        sensor->data.rotations = (int)(angle_track * INV_TWO_PI);
 
-
-
-    if (!sensor->velocity_ready) {
-        sensor->data.shaft_velocity = 0.0f;
-
-        sensor->last_angle = angle_now;//更新last_angle
-        sensor->last_angle_track = sensor->data.shaft_angle_track;//更新last_angle_track
-        sensor->velocity_ready = 1U;
-
-
-        for (uint16_t i = 0; i < SENSOR_VEL_WIN_MAX; i++)
-        {
-            sensor->velocity_windowed.vel_angle_track_buf[i] = sensor->data.shaft_angle_track;
-        }
-
-        sensor->velocity_windowed.vel_win_head   = 0U;
-        sensor->velocity_windowed.vel_win_count  = 1U;
-        sensor->velocity_windowed.vel_win_sum_dt = 0.0f;
-
-
-        return;
-    }
-
-
-        /* 写入当前角度到环形缓冲区 */
-        sensor->velocity_windowed.vel_win_head++;
-        if (sensor->velocity_windowed.vel_win_head >= SENSOR_VEL_WIN_MAX)
-        {
-            sensor->velocity_windowed.vel_win_head = 0U;
-        }
-        sensor->velocity_windowed.vel_angle_track_buf[sensor->velocity_windowed.vel_win_head] = sensor->data.shaft_angle_track;
-
-        if (sensor->velocity_windowed.vel_win_count < SENSOR_VEL_WIN_MAX)
-        {
-            sensor->velocity_windowed.vel_win_count++;
-            sensor->data.shaft_velocity_windowed = 0.0f;   /* 灌满窗口前先输出 0，最简单 */
-
-            /* 预填充阶段也要持续更新差分基准，避免后续速度计算引用陈旧值 */
+        if (!sensor->velocity_ready) {
+            sensor->data.shaft_velocity = 0.0f;
             sensor->last_angle = angle_now;
-            sensor->last_angle_track = sensor->data.shaft_angle_track;
-            return ;
+            sensor->last_angle_track = angle_track;
+            sensor->velocity_ready = 1U;
+
+            for (uint16_t i = 0U; i < SENSOR_VEL_WIN_MAX; i++) {
+                sensor->velocity_windowed.vel_angle_track_buf[i] = angle_track;
+            }
+
+            sensor->velocity_windowed.vel_win_head = 0U;
+            sensor->velocity_windowed.vel_win_count = 1U;
+            sensor->velocity_windowed.vel_win_sum_dt = 0.0f;
+            return;
         }
 
-        /* 满窗口后，“head 的下一个位置”就是 N 个周期前的样本 */
-        uint16_t old_idx = sensor->velocity_windowed.vel_win_head + 1U;
-        if (old_idx >= SENSOR_VEL_WIN_MAX)
-        {
+        velocity_windowed_t *vw = &sensor->velocity_windowed;
+        uint16_t head = (uint16_t)vw->vel_win_head + 1U;
+        if (head >= SENSOR_VEL_WIN_MAX) {
+            head = 0U;
+        }
+        vw->vel_win_head = (uint8_t)head;
+        vw->vel_angle_track_buf[head] = angle_track;
+
+        if (vw->vel_win_count < SENSOR_VEL_WIN_MAX) {
+            vw->vel_win_count++;
+            sensor->data.shaft_velocity_windowed = 0.0f;
+            sensor->last_angle = angle_now;
+            sensor->last_angle_track = angle_track;
+            return;
+        }
+
+        uint16_t old_idx = head + 1U;
+        if (old_idx >= SENSOR_VEL_WIN_MAX) {
             old_idx = 0U;
         }
 
-        float theta_old = sensor->velocity_windowed.vel_angle_track_buf[old_idx];
+        float theta_old = vw->vel_angle_track_buf[old_idx];
+        float inv_dt = 1.0f / dt;
 
-
-        sensor->data.shaft_velocity_windowed = (sensor->data.shaft_angle_track - theta_old) / ((float)SENSOR_VEL_WIN_NUMBER * dt);
-        sensor->data.shaft_velocity = (sensor->data.shaft_angle_track - sensor->last_angle_track) / dt;
-
-        /* 正常更新路径下同步刷新基准，供下一周期差分使用 */
+        sensor->data.shaft_velocity_windowed = (angle_track - theta_old) * (INV_VEL_WIN_NUMBER * inv_dt);
+        sensor->data.shaft_velocity = (angle_track - sensor->last_angle_track) * inv_dt;
         sensor->last_angle = angle_now;
-        sensor->last_angle_track = sensor->data.shaft_angle_track;
-
-
+        sensor->last_angle_track = angle_track;
         break;
     }
 
@@ -170,9 +158,6 @@ void Sensor_Update(Sensor_t *sensor, float dt)
         break;
     }
 }
-
-
-
 
 float Sensor_GetAngle(Sensor_t *sensor)
 {

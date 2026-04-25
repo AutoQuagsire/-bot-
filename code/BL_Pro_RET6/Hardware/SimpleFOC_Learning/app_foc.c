@@ -17,6 +17,8 @@
 extern SPI_HandleTypeDef hspi3;
 extern TIM_HandleTypeDef htim1;
 
+extern SPI_HandleTypeDef hspi1;
+extern TIM_HandleTypeDef htim4;
 /* =========================
  * 应用层 FOC 对象
  * =========================
@@ -24,13 +26,28 @@ extern TIM_HandleTypeDef htim1;
  * 所以统一放在 app_foc.c 内部静态保存
  */
 static AS5047P_Handle_t g_enc1;     // AS5047P 底层驱动句柄
+static AS5047P_Handle_t g_enc2;     // AS5047P 底层驱动句柄
+
 static Sensor_t         g_sensor1;  // 传感器公共层对象
+static Sensor_t         g_sensor2;  // 传感器公共层对象
+
+
 static Motor_t          g_motor1;   // 电机控制对象
+static PID_t            g_speed_pid1;
 static Driver_t        *g_driver1 = NULL; // 三相驱动对象（由 Driver 模块提供实例）
+LowPassFilter_t         g_speed_lpf1;
+
+
+static Motor_t          g_motor2;   // 电机控制对象
+static Driver_t        *g_driver2 = NULL; // 三相驱动对象（由 Driver 模块提供实例）
+static PID_t            g_speed_pid2;
+LowPassFilter_t         g_speed_lpf2;
+
+
 static uint32_t         g_last_loop_tick_ms = 0U;
 static uint32_t         g_last_print_tick_ms = 0U;
-static PID_t            g_speed_pid;
-LowPassFilter_t         g_speed_lpf1;
+
+
 
 PID_t Left_Velocity_FOC_PID;
 float Left_Target = 20.0f;
@@ -226,9 +243,37 @@ static __attribute__((unused)) float App_MatrixStep(uint32_t now_ms, float vel)
 uint8_t App_FOCStack_Init(void)
 {
     /* 1) 获取左电机对应的 driver 实例 */
-    g_driver1 = Driver_GetInstance(DRIVER_LEFT);
-    if (g_driver1 == NULL) {
-        USB_Debug_Printf("Driver_GetInstance failed\r\n");
+     g_driver1 = Driver_GetInstance(DRIVER_LEFT);
+
+     if ( g_driver1 == NULL) {
+        USB_Debug_Printf("Driver_GetInstance1 failed\r\n");
+        return 0U;
+    }    
+    if (!Driver_Init(g_driver1,
+                     &htim1,
+                     TIM_CHANNEL_1,
+                     TIM_CHANNEL_3,
+                     TIM_CHANNEL_4,
+                     19 * 0.577f)) {
+        USB_Debug_Printf("Driver1_Init failed\r\n");
+        return 0U;
+    }
+
+    if (!AS5047P_RW_Init(&g_enc1, &hspi3, EcdL_CS_GPIO_Port, EcdL_CS_Pin)) {
+        USB_Debug_Printf("AS5047P_RW_Init1 failed\r\n");
+        return 0U;
+    }
+    Sensor_LinkAS5047P(&g_enc1, &g_sensor1);    
+    if (!Sensor_Init(&g_sensor1)) {
+        USB_Debug_Printf("Sensor_Init1 failed\r\n");
+        return 0U;
+    }
+    linkSensor(&g_sensor1, &g_motor1);
+    linkDriver(g_driver1, &g_motor1);
+
+    g_driver2 = Driver_GetInstance(DRIVER_RIGHT);    
+    if ( g_driver2 == NULL) {
+        USB_Debug_Printf("Driver_GetInstance2 failed\r\n");
         return 0U;
     }
 
@@ -238,31 +283,37 @@ uint8_t App_FOCStack_Init(void)
      * - TIM_CHANNEL_1/3/4：三相对应的通道
      * - 19 * 0.577f：最大相电压限制（你当前的写法）
      */
-    if (!Driver_Init(g_driver1,
-                     &htim1,
-                     TIM_CHANNEL_1,
-                     TIM_CHANNEL_3,
+
+
+
+    if (!Driver_Init(g_driver2,
+                     &htim4,
                      TIM_CHANNEL_4,
+                     TIM_CHANNEL_3,
+                     TIM_CHANNEL_2,
                      19 * 0.577f)) {
-        USB_Debug_Printf("Driver_Init failed\r\n");
+        USB_Debug_Printf("Driver2_Init failed\r\n");
         return 0U;
     }
 
     /* 3) 初始化 AS5047P 底层驱动
      * 这里只做 SPI 与芯片基本通信确认 */
-    if (!AS5047P_RW_Init(&g_enc1, &hspi3, EcdL_CS_GPIO_Port, EcdL_CS_Pin)) {
-        USB_Debug_Printf("AS5047P_RW_Init failed\r\n");
+    if (!AS5047P_RW_Init(&g_enc2, &hspi1, EcdR_CS_GPIO_Port, EcdR_CS_Pin)) {
+        USB_Debug_Printf("AS5047P_RW_Init2 failed\r\n");
         return 0U;
     }
 
+
     /* 4) 将 AS5047P 设备句柄挂到 Sensor 公共层 */
-    Sensor_LinkAS5047P(&g_enc1, &g_sensor1);
 
     /* 5) 初始化 Sensor 层
      * Sensor_Init 只做链路确认和初始角记录
      * 不在这里做真正的速度估计 */
-    if (!Sensor_Init(&g_sensor1)) {
-        USB_Debug_Printf("Sensor_Init failed\r\n");
+
+
+    Sensor_LinkAS5047P(&g_enc2, &g_sensor2);
+    if (!Sensor_Init(&g_sensor2)) {
+        USB_Debug_Printf("Sensor_Init2 failed\r\n");
         return 0U;
     }
 
@@ -273,27 +324,34 @@ uint8_t App_FOCStack_Init(void)
      * - 后面几个暂时为 0，后续再逐步补充
      */
     MotorParam_Init(&g_motor1, 14.0f, 10.3f, 0.0f, 0.0f, 0.0f);
+    MotorParam_Init(&g_motor2, 14.0f, 10.3f, 0.0f, 0.0f, 0.0f);
+
 
     /* 7) 初始化电机当前状态
      * - 零位电角度先置 0，后面通过校准函数写入真实值
      * - 传感器方向先人工指定，后面可再做自动判定或验证
      */
     g_motor1.zero_electrical_angle = 0.0f;
-    g_motor1.state.sensor_direction = sensor_direction_cw;
+    g_motor1.state.sensor_direction = sensor_direction_ccw;
+
+    g_motor2.zero_electrical_angle = 0.0f;
+    g_motor2.state.sensor_direction = sensor_direction_ccw;
 
     /* 8) 把 Sensor 和 Driver 链接给 Motor
      * 从这一步开始，Motor 才真正拥有“读角度”和“打PWM”的能力 */
-    linkSensor(&g_sensor1, &g_motor1);
-    linkDriver(g_driver1, &g_motor1);
+
+
+    linkSensor(&g_sensor2, &g_motor2);
+    linkDriver(g_driver2, &g_motor2);
 
 #if APP_SPEED_LOOP_ENABLE
-    g_speed_pid.error_integral = 0.0f;
-    g_speed_pid.last_error = 0.0f;
-    g_speed_pid.output = 0.0f;
-    g_speed_pid.output_limit = APP_SPEED_UQ_LIMIT;
-    g_speed_pid.I_ERR_MIN = APP_SPEED_I_ERR_MIN;
-    g_speed_pid.I_SEP_RATIO = APP_SPEED_I_SEP_RATIO;
-    PID_ParameterInitEx(&g_speed_pid,
+    g_speed_pid1.error_integral = 0.0f;
+    g_speed_pid1.last_error = 0.0f;
+    g_speed_pid1.output = 0.0f;
+    g_speed_pid1.output_limit = APP_SPEED_UQ_LIMIT;
+    g_speed_pid1.I_ERR_MIN = APP_SPEED_I_ERR_MIN;
+    g_speed_pid1.I_SEP_RATIO = APP_SPEED_I_SEP_RATIO;
+    PID_ParameterInitEx(&g_speed_pid1,
                         APP_SPEED_KP,
                         APP_SPEED_KI,
                         APP_SPEED_KD,
@@ -301,11 +359,21 @@ uint8_t App_FOCStack_Init(void)
                         APP_SPEED_UQ_LIMIT,
                         APP_SPEED_I_ERR_MIN,
                         APP_SPEED_I_SEP_RATIO);
-    Left_Velocity_FOC_PID = g_speed_pid;
+    PID_ParameterInitEx(&g_speed_pid2,
+                        APP_SPEED_KP,
+                        APP_SPEED_KI,
+                        APP_SPEED_KD,
+                        APP_SPEED_I_LIMIT,
+                        APP_SPEED_UQ_LIMIT,
+                        APP_SPEED_I_ERR_MIN,
+                        APP_SPEED_I_SEP_RATIO);
+
+
+    Left_Velocity_FOC_PID = g_speed_pid1;
     Left_Target = APP_SPEED_TARGET_RAD_S;
     g_speed_fault = 0U;
     LowPassFilter_Init(&g_speed_lpf1, 100.0f, FOC_FREQUENCY);   
-
+    LowPassFilter_Init(&g_speed_lpf2, 100.0f, FOC_FREQUENCY);   
 #endif
 
     USB_Debug_Printf("FOC stack init ok\r\n");
@@ -331,13 +399,20 @@ uint8_t App_StartupCalibrate(void)
      * - 3.0f * PI / 2.0f     : 对齐目标电角度（3π/2）
      * - 300                  : 对齐稳定等待时间，单位 ms
      */
-    if (!Motor_CalibrateZeroElectricalAngle(&g_motor1, 4.0f, 3.0f * PI / 2.0f, 300)) {
-        USB_Debug_Printf("Startup calibrate failed\r\n");
+    if (!Motor_CalibrateZeroElectricalAngle(&g_motor1, -5.0f, 3.0f *PI / 2.0f, 300)) {
+        USB_Debug_Printf("Startup calibrate1 failed\r\n");
+        return 0U;
+    }
+    /* 打印校准结果，便于调试确认 */
+    USB_Debug_Printf("zero_elec = %.6f\r\n", g_motor1.zero_electrical_angle);
+
+
+    if (!Motor_CalibrateZeroElectricalAngle(&g_motor2, -5.0f, 3.0f *PI / 2.0f, 300)) {
+        USB_Debug_Printf("Startup calibrate2 failed\r\n");
         return 0U;
     }
 
-    /* 打印校准结果，便于调试确认 */
-    USB_Debug_Printf("zero_elec = %.6f\r\n", g_motor1.zero_electrical_angle);
+    USB_Debug_Printf("zero_elec = %.6f\r\n", g_motor2.zero_electrical_angle);
     return 1U;
 }
 
@@ -386,8 +461,8 @@ void App_Loop(void)
     }
 
     if (!g_speed_fault) {
-        PID_Calculate(&g_speed_pid, vel_target, vel, 0U);
-        uq_cmd = g_speed_pid.output;
+        PID_Calculate(&g_speed_pid1, vel_target, vel, 0U);
+        uq_cmd = g_speed_pid1.output;
     } else {
         uq_cmd = 0.0f;
     }
@@ -425,9 +500,14 @@ void App_FOCControlIT_Enable(void)
 }
 
 
-float vel = 0;
-float vel_windowed = 0;
-float vel_windowed_f = 0;
+float vel1 = 0;
+float vel_windowed1 = 0;
+float vel_windowed_f1 = 0;
+
+float vel2 = 0;
+float vel_windowed2 = 0;
+float vel_windowed_f2 = 0;
+
 //10Khz中断内部程序
 void App_LoopForIT(void)
 {
@@ -435,39 +515,66 @@ void App_LoopForIT(void)
     if (!Motor_UpdateSensor(&g_motor1, 0.0001f )) {
         return;
     }
+    float elec_angle1 = g_motor1.electrical_angle ;
+    float uq_cmd1 = APP_LOOP_TEST_UQ_V;
+    float vel_target1 = Left_Target;
+    vel1 = Sensor_GetVelocityRaw(&g_sensor1);
+    vel_windowed1 = Sensor_GetVelocityWindowed(&g_sensor1);
+    vel_windowed_f1 = LowPassFilter_Update(&g_speed_lpf1, vel1);
 
-    float elec_angle = g_motor1.electrical_angle ;
 
-    float uq_cmd = APP_LOOP_TEST_UQ_V;
-    float vel_target = Left_Target;
-    vel = Sensor_GetVelocityRaw(&g_sensor1);
-    vel_windowed = Sensor_GetVelocityWindowed(&g_sensor1);
-    vel_windowed_f = LowPassFilter_Update(&g_speed_lpf1, vel);
-    float vel_error = vel_target - vel;
+    if (!Motor_UpdateSensor(&g_motor2, 0.0001f )) {
+        return;
+    }
+    float elec_angle2 = g_motor2.electrical_angle ;
+    float uq_cmd2 = APP_LOOP_TEST_UQ_V;
+    float vel_target2 = Left_Target;
+    vel2 = Sensor_GetVelocityRaw(&g_sensor2);
+    vel_windowed2 = Sensor_GetVelocityWindowed(&g_sensor2);
+    vel_windowed_f2 = LowPassFilter_Update(&g_speed_lpf2, vel2);
+
 
     #if APP_SPEED_LOOP_ENABLE
-        if (fabsf(vel) > APP_SPEED_VEL_FAULT_ABS) {
+
+        if (fabsf(vel1) > APP_SPEED_VEL_FAULT_ABS) {
             g_speed_fault = 1U;
         }
 
         if (!g_speed_fault) {
-            PID_Calculate(&g_speed_pid, vel_target, vel_windowed_f, 0U);
-            uq_cmd = g_speed_pid.output;
+            PID_Calculate(&g_speed_pid1, vel_target1, vel_windowed_f1, 0U);
+            uq_cmd1 = g_speed_pid1.output;
         } else {
-            uq_cmd = 0.0f;
+            uq_cmd1 = 0.0f;
         }
-    #endif
-    Motor_SetPhaseVoltageQ(&g_motor1, uq_cmd, elec_angle);
 
-    Left_Velocity_FOC_PID = g_speed_pid;
+
+        if (fabsf(vel2) > APP_SPEED_VEL_FAULT_ABS) {
+            g_speed_fault = 1U;
+        }
+
+        if (!g_speed_fault) {
+            PID_Calculate(&g_speed_pid2, vel_target2, vel_windowed_f2, 0U);
+            uq_cmd2 = g_speed_pid2.output;
+        } else {
+            uq_cmd2 = 0.0f;
+        }
+
+
+
+
+    #endif
+    Motor_SetPhaseVoltageQ(&g_motor1, uq_cmd1, elec_angle1);
+    Motor_SetPhaseVoltageQ(&g_motor2, uq_cmd2, elec_angle2);
+
+    Left_Velocity_FOC_PID = g_speed_pid1;
     pid_csv_data.timestamp_ms = HAL_GetTick();
-    pid_csv_data.setpoint = vel_target;
-    pid_csv_data.input = vel_windowed_f;
-    pid_csv_data.pwm = uq_cmd;
-    pid_csv_data.error = vel_target - vel_windowed_f;
-    pid_csv_data.p_term = g_speed_pid.Kp * pid_csv_data.error;
-    pid_csv_data.i_term = g_speed_pid.Ki * g_speed_pid.error_integral;
-    pid_csv_data.d_term = g_speed_pid.Kd * (pid_csv_data.error - g_speed_pid.last_error);
+    pid_csv_data.setpoint = vel_target1;
+    pid_csv_data.input = vel_windowed_f1;
+    pid_csv_data.pwm = uq_cmd1;
+    pid_csv_data.error = vel_target1 - vel_windowed_f1;
+    pid_csv_data.p_term = g_speed_pid1.Kp * pid_csv_data.error;
+    pid_csv_data.i_term = g_speed_pid1.Ki * g_speed_pid1.error_integral;
+    pid_csv_data.d_term = g_speed_pid1.Kd * (pid_csv_data.error - g_speed_pid1.last_error);
 
 }
 
@@ -481,6 +588,6 @@ void DebuginWhile(void)
     }
 
     last_print_ms = now_ms;
-    USB_Debug_Printf("vel,windowed,filtered: %.2f, %.2f, %.2f\r\n", vel, vel_windowed, vel_windowed_f);
+    USB_Debug_Printf("vel,windowed,filtered: %.2f, %.2f, %.2f, %.2f\r\n", vel_windowed1, vel_windowed_f1,vel2,vel_windowed_f2);
 
 }
