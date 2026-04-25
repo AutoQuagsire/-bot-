@@ -17,8 +17,15 @@ static float pwm_scale = 0.0f;
 __attribute__((optimize("O2,fast-math")))
 void Get_SinCos(float angle_el, float *sint, float *cost)
 {
+    if (!sint || !cost) {
+        return;
+    }
+#if defined(__GNUC__)
+    __builtin_sincosf(angle_el, sint, cost);
+#else
     *sint = sinf(angle_el);
     *cost = cosf(angle_el);
+#endif
 }
 
 

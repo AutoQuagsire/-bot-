@@ -52,7 +52,8 @@ static uint32_t         g_last_print_tick_ms = 0U;
 PID_t Left_Velocity_FOC_PID;
 float Left_Target = 20.0f;
 
-static uint8_t          g_speed_fault = 0U;
+static uint8_t          g_speed_fault1 = 0U;
+static uint8_t          g_speed_fault2 = 0U;
 
 #define APP_LOOP_TEST_UQ_V        (1.0f)
 #define APP_LOOP_PRINT_PERIOD_MS  (100U)
@@ -371,7 +372,10 @@ uint8_t App_FOCStack_Init(void)
 
     Left_Velocity_FOC_PID = g_speed_pid1;
     Left_Target = APP_SPEED_TARGET_RAD_S;
-    g_speed_fault = 0U;
+    g_speed_fault1 = 0U;
+    g_speed_fault2 = 0U;
+
+
     LowPassFilter_Init(&g_speed_lpf1, 100.0f, FOC_FREQUENCY);   
     LowPassFilter_Init(&g_speed_lpf2, 100.0f, FOC_FREQUENCY);   
 #endif
@@ -399,7 +403,7 @@ uint8_t App_StartupCalibrate(void)
      * - 3.0f * PI / 2.0f     : 对齐目标电角度（3π/2）
      * - 300                  : 对齐稳定等待时间，单位 ms
      */
-    if (!Motor_CalibrateZeroElectricalAngle(&g_motor1, -5.0f, 3.0f *PI / 2.0f, 300)) {
+    if (!Motor_CalibrateZeroElectricalAngle(&g_motor1, -5.0f, PI / 2.0f, 300)) {
         USB_Debug_Printf("Startup calibrate1 failed\r\n");
         return 0U;
     }
@@ -407,7 +411,7 @@ uint8_t App_StartupCalibrate(void)
     USB_Debug_Printf("zero_elec = %.6f\r\n", g_motor1.zero_electrical_angle);
 
 
-    if (!Motor_CalibrateZeroElectricalAngle(&g_motor2, -5.0f, 3.0f *PI / 2.0f, 300)) {
+    if (!Motor_CalibrateZeroElectricalAngle(&g_motor2, -5.0f, PI / 2.0f, 300)) {
         USB_Debug_Printf("Startup calibrate2 failed\r\n");
         return 0U;
     }
@@ -457,10 +461,10 @@ void App_Loop(void)
 
 #if APP_SPEED_LOOP_ENABLE
     if (fabsf(vel) > APP_SPEED_VEL_FAULT_ABS) {
-        g_speed_fault = 1U;
+        g_speed_fault1 = 1U;
     }
 
-    if (!g_speed_fault) {
+    if (!g_speed_fault1) {
         PID_Calculate(&g_speed_pid1, vel_target, vel, 0U);
         uq_cmd = g_speed_pid1.output;
     } else {
@@ -468,7 +472,10 @@ void App_Loop(void)
     }
 #endif
 
-    Motor_SetPhaseVoltageQ(&g_motor1, uq_cmd, elec_angle);
+    float sin_e1 = 0.0f;
+    float cos_e1 = 0.0f;
+    Get_SinCos(elec_angle, &sin_e1, &cos_e1);
+    Motor_SetPhaseVoltageQBySinCos(&g_motor1, uq_cmd, sin_e1, cos_e1);
 
     if ((now_ms - g_last_print_tick_ms) >= APP_LOOP_PRINT_PERIOD_MS) {
         g_last_print_tick_ms = now_ms;
@@ -480,7 +487,7 @@ void App_Loop(void)
                          uq_cmd,
                          Sensor_GetAngle(&g_sensor1),
                          g_motor1.electrical_angle,
-                         (unsigned)g_speed_fault);
+                         (unsigned)g_speed_fault1);
 #else
         USB_Debug_Printf("mech=%.4f elec=%.4f vel=%.3f uq=%.2f\r\n",
                          Sensor_GetAngle(&g_sensor1),
@@ -503,20 +510,23 @@ void App_FOCControlIT_Enable(void)
 float vel1 = 0;
 float vel_windowed1 = 0;
 float vel_windowed_f1 = 0;
+float uq_cmd1 = 0.0f;
 
 float vel2 = 0;
 float vel_windowed2 = 0;
 float vel_windowed_f2 = 0;
-
+float uq_cmd2 = 0.0f;
 //10Khz中断内部程序
 void App_LoopForIT(void)
 {
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 
     if (!Motor_UpdateSensor(&g_motor1, 0.0001f )) {
         return;
     }
+
     float elec_angle1 = g_motor1.electrical_angle ;
-    float uq_cmd1 = APP_LOOP_TEST_UQ_V;
+    uq_cmd1 = APP_LOOP_TEST_UQ_V;
     float vel_target1 = Left_Target;
     vel1 = Sensor_GetVelocityRaw(&g_sensor1);
     vel_windowed1 = Sensor_GetVelocityWindowed(&g_sensor1);
@@ -527,7 +537,7 @@ void App_LoopForIT(void)
         return;
     }
     float elec_angle2 = g_motor2.electrical_angle ;
-    float uq_cmd2 = APP_LOOP_TEST_UQ_V;
+    uq_cmd2 = APP_LOOP_TEST_UQ_V;
     float vel_target2 = Left_Target;
     vel2 = Sensor_GetVelocityRaw(&g_sensor2);
     vel_windowed2 = Sensor_GetVelocityWindowed(&g_sensor2);
@@ -536,35 +546,30 @@ void App_LoopForIT(void)
 
     #if APP_SPEED_LOOP_ENABLE
 
-        if (fabsf(vel1) > APP_SPEED_VEL_FAULT_ABS) {
-            g_speed_fault = 1U;
-        }
 
-        if (!g_speed_fault) {
+
             PID_Calculate(&g_speed_pid1, vel_target1, vel_windowed_f1, 0U);
             uq_cmd1 = g_speed_pid1.output;
-        } else {
-            uq_cmd1 = 0.0f;
-        }
 
-
-        if (fabsf(vel2) > APP_SPEED_VEL_FAULT_ABS) {
-            g_speed_fault = 1U;
-        }
-
-        if (!g_speed_fault) {
             PID_Calculate(&g_speed_pid2, vel_target2, vel_windowed_f2, 0U);
             uq_cmd2 = g_speed_pid2.output;
-        } else {
-            uq_cmd2 = 0.0f;
-        }
 
 
 
 
     #endif
-    Motor_SetPhaseVoltageQ(&g_motor1, uq_cmd1, elec_angle1);
-    Motor_SetPhaseVoltageQ(&g_motor2, uq_cmd2, elec_angle2);
+
+
+    float sin_e1 = 0.0f;
+    float cos_e1 = 0.0f;
+    Get_SinCos(elec_angle1, &sin_e1, &cos_e1);
+
+    float sin_e2 = 0.0f;
+    float cos_e2 = 0.0f;
+    Get_SinCos(elec_angle2, &sin_e2, &cos_e2);
+
+    Motor_SetPhaseVoltageQBySinCos(&g_motor1, uq_cmd1, sin_e1, cos_e1);
+    Motor_SetPhaseVoltageQBySinCos(&g_motor2, uq_cmd2, sin_e2, cos_e2);
 
     Left_Velocity_FOC_PID = g_speed_pid1;
     pid_csv_data.timestamp_ms = HAL_GetTick();
@@ -575,6 +580,7 @@ void App_LoopForIT(void)
     pid_csv_data.p_term = g_speed_pid1.Kp * pid_csv_data.error;
     pid_csv_data.i_term = g_speed_pid1.Ki * g_speed_pid1.error_integral;
     pid_csv_data.d_term = g_speed_pid1.Kd * (pid_csv_data.error - g_speed_pid1.last_error);
+        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
 
 }
 
@@ -588,6 +594,6 @@ void DebuginWhile(void)
     }
 
     last_print_ms = now_ms;
-    USB_Debug_Printf("vel,windowed,filtered: %.2f, %.2f, %.2f, %.2f\r\n", vel_windowed1, vel_windowed_f1,vel2,vel_windowed_f2);
+    USB_Debug_Printf("vel,windowed,filtered: %.2f, %.2f, %.2f, %.2f\r\n", uq_cmd1, vel_windowed_f1,uq_cmd2,vel_windowed_f2);
 
 }

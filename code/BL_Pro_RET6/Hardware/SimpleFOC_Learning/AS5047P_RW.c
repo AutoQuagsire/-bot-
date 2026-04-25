@@ -2,7 +2,17 @@
 #include "stdint.h"
 #include "sys.h"
 
-/* 使能 DWT 周期计数器，用于微秒级超时 */
+#if defined(__GNUC__) && !defined(__clang__)
+#define AS5047P_OPTIMIZE __attribute__((optimize("O2,fast-math")))
+#else
+#define AS5047P_OPTIMIZE
+#endif
+
+#define AS5047P_CMD_READ_ANGLEUNC  0x7FFEU
+#define AS5047P_CMD_READ_NOP       0xC000U
+#define AS5047P_READ_RETRY_MAX     3U
+#define AS5047P_ENABLE_FRAME_PARITY_CHECK 0U
+
 static inline void as5047p_enable_dwt_cycle_counter(void)
 {
     if ((CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) == 0U) {
@@ -14,7 +24,7 @@ static inline void as5047p_enable_dwt_cycle_counter(void)
     }
 }
 
-/* 计算 AS5047P 偶校验位：根据 bit[14:0] 生成 bit15 */
+/* Parity bit for AS5047P SPI frames: even parity over lower 15 bits. */
 static inline uint8_t as5047p_calc_parity(uint16_t value)
 {
     value &= 0x7FFFU;
@@ -25,30 +35,15 @@ static inline uint8_t as5047p_calc_parity(uint16_t value)
     return value & 1U;
 }
 
-/* 对 GCC 编译器给关键函数单独优化 */
-#if defined(__GNUC__) && !defined(__clang__)
-#define AS5047P_OPTIMIZE __attribute__((optimize("O2,fast-math")))
-#else
-#define AS5047P_OPTIMIZE
-#endif
-
-/* 已经带读位和校验位的常用命令 */
-#define AS5047P_CMD_READ_ANGLEUNC  0x7FFEU
-#define AS5047P_CMD_READ_NOP       0xC000U
-
-/* 根据寄存器地址生成 AS5047P 读命令 */
 static inline uint16_t as5047p_make_read_cmd(uint16_t reg)
 {
-    uint16_t cmd = reg | 0x4000U;
-
+    uint16_t cmd = reg | 0x4000U; /* READ bit */
     if (as5047p_calc_parity(cmd)) {
         cmd |= 0x8000U;
     }
-
     return cmd;
 }
 
-/* CS 拉高后的保持时间，保证两帧之间满足 tCSH */
 static inline void as5047p_tCSH_delay(void)
 {
     __NOP();__NOP();__NOP();__NOP();__NOP();__NOP();__NOP();__NOP();__NOP();__NOP();
@@ -59,41 +54,32 @@ static inline void as5047p_tCSH_delay(void)
     __NOP();__NOP();__NOP();__NOP();__NOP();__NOP();__NOP();__NOP();__NOP();__NOP();
 }
 
-/* 恢复 SPI 异常状态，清空残留数据和错误标志 */
 static inline void as5047p_spi_recover(AS5047P_Handle_t *dev)
 {
     SPI_TypeDef *spi = dev->hspi->Instance;
 
-    /* 清空 RX FIFO，避免读到旧数据 */
     while ((spi->SR & SPI_SR_FRLVL) != SPI_FRLVL_EMPTY) {
         (void)*(__IO uint16_t *)&spi->DR;
     }
 
-    /* 清除接收溢出错误 */
     if (spi->SR & SPI_SR_OVR) {
         (void)*(__IO uint16_t *)&spi->DR;
         (void)spi->SR;
     }
-
-    /* 清除帧格式错误 */
     if (spi->SR & SPI_SR_FRE) {
         (void)spi->SR;
     }
-
-    /* 清除模式错误，并重新使能 SPI */
     if (spi->SR & SPI_SR_MODF) {
         (void)spi->SR;
         CLEAR_BIT(spi->CR1, SPI_CR1_SPE);
         SET_BIT(spi->CR1, SPI_CR1_SPE);
     }
 
-    /* 确保 SPI 外设处于使能状态 */
     if ((spi->CR1 & SPI_CR1_SPE) == 0U) {
         SET_BIT(spi->CR1, SPI_CR1_SPE);
     }
 }
 
-/* 单帧 16-bit SPI 传输，直接操作寄存器以减少 HAL 开销 */
 AS5047P_OPTIMIZE
 static AS5047P_Status_t as5047p_spi_transfer16(AS5047P_Handle_t *dev,
                                                uint16_t tx,
@@ -102,11 +88,10 @@ static AS5047P_Status_t as5047p_spi_transfer16(AS5047P_Handle_t *dev,
     if (!dev || !dev->hspi || !rx) return AS5047P_ERROR;
 
     SPI_TypeDef *spi = dev->hspi->Instance;
-    const uint32_t TO = 3400U;   /* 约 20us @170MHz */
+    const uint32_t TO = 3400U; /* ~20us @170MHz */
     uint32_t t0;
     uint32_t sr;
 
-    /* 传输前检查 SPI 是否有残留数据或错误状态 */
     sr = spi->SR;
     if ((sr & (SPI_SR_OVR | SPI_SR_FRE | SPI_SR_MODF)) ||
         ((sr & SPI_SR_FRLVL) != SPI_FRLVL_EMPTY) ||
@@ -116,11 +101,8 @@ static AS5047P_Status_t as5047p_spi_transfer16(AS5047P_Handle_t *dev,
     }
 
     as5047p_tCSH_delay();
-
-    /* CS 拉低，开始一帧 SPI 传输 */
     dev->cs_port->BSRR = ((uint32_t)dev->cs_pin) << 16U;
 
-    /* 等待发送缓冲区可写 */
     t0 = DWT_GetTicks();
     while (((sr = spi->SR) & SPI_SR_TXE) == 0U) {
         if (sr & (SPI_SR_OVR | SPI_SR_FRE | SPI_SR_MODF)) {
@@ -131,10 +113,8 @@ static AS5047P_Status_t as5047p_spi_transfer16(AS5047P_Handle_t *dev,
         }
     }
 
-    /* 写入 16-bit 发送数据 */
     *(__IO uint16_t *)&spi->DR = tx;
 
-    /* 等待接收完成 */
     t0 = DWT_GetTicks();
     while (((sr = spi->SR) & SPI_SR_RXNE) == 0U) {
         if (sr & (SPI_SR_OVR | SPI_SR_FRE | SPI_SR_MODF)) {
@@ -145,10 +125,8 @@ static AS5047P_Status_t as5047p_spi_transfer16(AS5047P_Handle_t *dev,
         }
     }
 
-    /* 读取 16-bit 接收数据 */
     *rx = *(__IO uint16_t *)&spi->DR;
 
-    /* 等待总线空闲，确保本帧真正结束 */
     t0 = DWT_GetTicks();
     while ((spi->SR & SPI_SR_BSY) != 0U) {
         if (DWT_GetElapsedTicks(t0) > TO) {
@@ -156,12 +134,8 @@ static AS5047P_Status_t as5047p_spi_transfer16(AS5047P_Handle_t *dev,
         }
     }
 
-    /* CS 拉高，结束本帧 */
     dev->cs_port->BSRR = dev->cs_pin;
-
-    /* bit14 为 AS5047P 返回的错误标志 EF */
-    dev->errorflag = ((*rx & 0x4000U) != 0U);
-
+    dev->errorflag = (uint8_t)((*rx & 0x4000U) != 0U);
     return AS5047P_OK;
 
 fail_error:
@@ -175,7 +149,6 @@ fail_timeout:
     return AS5047P_TIMEOUT;
 }
 
-/* 两帧式读取：第一帧发命令，第二帧发 READ_NOP 取回结果 */
 AS5047P_OPTIMIZE
 static AS5047P_Status_t as5047p_pipeline_read(AS5047P_Handle_t *dev,
                                               uint16_t cmd,
@@ -184,51 +157,210 @@ static AS5047P_Status_t as5047p_pipeline_read(AS5047P_Handle_t *dev,
     if (!dev || !frame) return AS5047P_ERROR;
 
     uint16_t dummy = 0U;
-
-    /* 第一帧返回的是上一条命令的结果，这里丢弃 */
     AS5047P_Status_t st = as5047p_spi_transfer16(dev, cmd, &dummy);
     if (st != AS5047P_OK) return st;
-
-    /* 第二帧返回第一帧命令对应的数据 */
     return as5047p_spi_transfer16(dev, AS5047P_CMD_READ_NOP, frame);
 }
 
-/* 读取 ANGLEUNC 原始角度 */
-AS5047P_Status_t AS5047P_ReadRawAngle(AS5047P_Handle_t *dev, uint16_t *raw)
+AS5047P_OPTIMIZE
+static AS5047P_Status_t as5047p_pipeline_read_angle_fast(AS5047P_Handle_t *dev,
+                                                         uint16_t *raw)
 {
-    if (!dev || !raw) return AS5047P_ERROR;
+    SPI_TypeDef *spi = dev->hspi->Instance;
+    const uint32_t TO = 3400U; /* ~20us @170MHz */
+    uint32_t t0;
+    uint32_t sr;
+    uint16_t frame;
 
-    uint16_t rx = 0U;
-
-    AS5047P_Status_t st = as5047p_pipeline_read(dev, AS5047P_CMD_READ_ANGLEUNC, &rx);
-    if (st != AS5047P_OK) 
-    {
-        return st;
+    sr = spi->SR;
+    if ((sr & (SPI_SR_OVR | SPI_SR_FRE | SPI_SR_MODF)) ||
+        ((sr & SPI_SR_FRLVL) != SPI_FRLVL_EMPTY) ||
+        ((spi->CR1 & SPI_CR1_SPE) == 0U)) {
+        as5047p_spi_recover(dev);
     }
 
-    /* 检查 AS5047P 返回帧错误标志 */
-    if (rx & 0x4000U) {
+    as5047p_tCSH_delay();
+    dev->cs_port->BSRR = ((uint32_t)dev->cs_pin) << 16U;
+
+    t0 = DWT_GetTicks();
+    while (((sr = spi->SR) & SPI_SR_TXE) == 0U) {
+        if (sr & (SPI_SR_OVR | SPI_SR_FRE | SPI_SR_MODF)) goto fail;
+        if (DWT_GetElapsedTicks(t0) > TO) goto fail;
+    }
+    *(__IO uint16_t *)&spi->DR = AS5047P_CMD_READ_ANGLEUNC;
+
+    t0 = DWT_GetTicks();
+    while (((sr = spi->SR) & SPI_SR_RXNE) == 0U) {
+        if (sr & (SPI_SR_OVR | SPI_SR_FRE | SPI_SR_MODF)) goto fail;
+        if (DWT_GetElapsedTicks(t0) > TO) goto fail;
+    }
+    (void)*(__IO uint16_t *)&spi->DR;
+
+    t0 = DWT_GetTicks();
+    while ((spi->SR & SPI_SR_BSY) != 0U) {
+        if (DWT_GetElapsedTicks(t0) > TO) goto fail;
+    }
+    dev->cs_port->BSRR = dev->cs_pin;
+
+    as5047p_tCSH_delay();
+    dev->cs_port->BSRR = ((uint32_t)dev->cs_pin) << 16U;
+
+    t0 = DWT_GetTicks();
+    while (((sr = spi->SR) & SPI_SR_TXE) == 0U) {
+        if (sr & (SPI_SR_OVR | SPI_SR_FRE | SPI_SR_MODF)) goto fail;
+        if (DWT_GetElapsedTicks(t0) > TO) goto fail;
+    }
+    *(__IO uint16_t *)&spi->DR = AS5047P_CMD_READ_NOP;
+
+    t0 = DWT_GetTicks();
+    while (((sr = spi->SR) & SPI_SR_RXNE) == 0U) {
+        if (sr & (SPI_SR_OVR | SPI_SR_FRE | SPI_SR_MODF)) goto fail;
+        if (DWT_GetElapsedTicks(t0) > TO) goto fail;
+    }
+    frame = *(__IO uint16_t *)&spi->DR;
+
+    t0 = DWT_GetTicks();
+    while ((spi->SR & SPI_SR_BSY) != 0U) {
+        if (DWT_GetElapsedTicks(t0) > TO) goto fail;
+    }
+
+    dev->cs_port->BSRR = dev->cs_pin;
+    if (frame & 0x4000U) {
         dev->errorflag = 1U;
         return AS5047P_ERROR;
     }
 
-    /* 低 14 位为角度值 */
-    *raw = rx & 0x3FFFU;
+    *raw = frame & 0x3FFFU;
+    dev->errorflag = 0U;
+    return AS5047P_OK;
 
-    dev->raw_angle = *raw;
-    dev->angle_rad = (*raw) * AS5047P_ANGLE_RAD_SCALE;
+fail:
+    dev->cs_port->BSRR = dev->cs_pin;
+    as5047p_spi_recover(dev);
+    return AS5047P_TIMEOUT;
+}
 
+/* Reading ERRFL clears sticky command-frame error bits (PARERR/INVCOMM/FRERR). */
+AS5047P_OPTIMIZE
+static AS5047P_Status_t as5047p_read_errfl_and_clear(AS5047P_Handle_t *dev, uint16_t *errfl)
+{
+    if (!dev) return AS5047P_ERROR;
+
+    uint16_t frame = 0U;
+    AS5047P_Status_t st = as5047p_pipeline_read(dev, as5047p_make_read_cmd(AS5047P_REG_ERRFL), &frame);
+    if (st != AS5047P_OK) return st;
+
+    if (errfl) {
+        *errfl = (frame & 0x3FFFU);
+    }
     return AS5047P_OK;
 }
 
-/* 读取 ERRFL，通常用于清除 AS5047P 错误标志 */
-AS5047P_Status_t AS5047P_ClearErrorFlag(AS5047P_Handle_t *dev)
+AS5047P_OPTIMIZE
+static AS5047P_Status_t as5047p_read_register14_fast(AS5047P_Handle_t *dev,
+                                                      uint16_t cmd,
+                                                      uint16_t *data,
+                                                      uint8_t check_ef)
 {
-    uint16_t dummy = 0U;
-    return as5047p_pipeline_read(dev, as5047p_make_read_cmd(AS5047P_REG_ERRFL), &dummy);
+    if (!dev || !data) return AS5047P_ERROR;
+
+    uint16_t frame = 0U;
+    AS5047P_Status_t st = as5047p_pipeline_read(dev, cmd, &frame);
+    if (st != AS5047P_OK) return st;
+
+    if (check_ef && (frame & 0x4000U)) {
+        dev->errorflag = 1U;
+        return AS5047P_ERROR;
+    }
+
+    *data = frame & 0x3FFFU;
+    dev->errorflag = 0U;
+    return AS5047P_OK;
 }
 
-/* 初始化 AS5047P 驱动，并做一次读角通信测试 */
+AS5047P_OPTIMIZE
+static AS5047P_Status_t as5047p_read_register14_recover(AS5047P_Handle_t *dev,
+                                                         uint16_t cmd,
+                                                         uint16_t *data,
+                                                         uint8_t check_ef)
+{
+    if (!dev || !data) return AS5047P_ERROR;
+
+    AS5047P_Status_t st = AS5047P_ERROR;
+    uint16_t frame = 0U;
+    uint16_t errfl = 0U;
+
+    for (uint8_t i = 0U; i < AS5047P_READ_RETRY_MAX; i++) {
+        st = as5047p_pipeline_read(dev, cmd, &frame);
+        if (st != AS5047P_OK) {
+            continue;
+        }
+
+#if AS5047P_ENABLE_FRAME_PARITY_CHECK
+        if (as5047p_calc_parity(frame) != ((frame >> 15U) & 0x1U)) {
+            dev->errorflag = 1U;
+            (void)as5047p_read_errfl_and_clear(dev, &errfl);
+            st = AS5047P_ERROR;
+            continue;
+        }
+#endif
+
+        if (check_ef && (frame & 0x4000U)) {
+            dev->errorflag = 1U;
+            (void)as5047p_read_errfl_and_clear(dev, &errfl);
+            st = AS5047P_ERROR;
+            continue;
+        }
+
+        *data = frame & 0x3FFFU;
+        dev->errorflag = 0U;
+        return AS5047P_OK;
+    }
+
+    return st;
+}
+
+AS5047P_Status_t AS5047P_ReadRawAngle(AS5047P_Handle_t *dev, uint16_t *raw)
+{
+    if (!dev || !raw) return AS5047P_ERROR;
+
+    AS5047P_Status_t st = as5047p_pipeline_read_angle_fast(dev, raw);
+    if (st != AS5047P_OK) {
+        uint16_t errfl = 0U;
+        (void)as5047p_read_errfl_and_clear(dev, &errfl);
+        st = as5047p_read_register14_recover(dev, AS5047P_CMD_READ_ANGLEUNC, raw, 1U);
+        if (st != AS5047P_OK) {
+            return st;
+        }
+    }
+
+    dev->raw_angle = *raw;
+    dev->angle_rad = (*raw) * AS5047P_ANGLE_RAD_SCALE;
+    return AS5047P_OK;
+}
+
+AS5047P_Status_t AS5047P_ReadMagnitude(AS5047P_Handle_t *dev, uint16_t *mag)
+{
+    if (!dev || !mag) return AS5047P_ERROR;
+
+    AS5047P_Status_t st = as5047p_read_register14_fast(dev, as5047p_make_read_cmd(AS5047P_REG_MAG), mag, 1U);
+    if (st == AS5047P_OK) return st;
+
+    uint16_t errfl = 0U;
+    (void)as5047p_read_errfl_and_clear(dev, &errfl);
+    return as5047p_read_register14_recover(dev, as5047p_make_read_cmd(AS5047P_REG_MAG), mag, 1U);
+}
+
+AS5047P_Status_t AS5047P_ReadErrfl(AS5047P_Handle_t *dev, uint16_t *errfl)
+{
+    return as5047p_read_errfl_and_clear(dev, errfl);
+}
+
+AS5047P_Status_t AS5047P_ClearErrorFlag(AS5047P_Handle_t *dev)
+{
+    return as5047p_read_errfl_and_clear(dev, NULL);
+}
+
 uint8_t AS5047P_RW_Init(AS5047P_Handle_t *dev,
                         SPI_HandleTypeDef *hspi,
                         GPIO_TypeDef *cs_port,
@@ -249,10 +381,17 @@ uint8_t AS5047P_RW_Init(AS5047P_Handle_t *dev,
     dev->raw_angle = 0U;
     dev->angle_rad = 0.0f;
 
-    /* CS 空闲态为高电平 */
+    /* Keep CS high before first SPI transaction. */
     HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
 
-    /* 基础通信测试 */
+    /* Datasheet tpon: first valid angular value is available after power-on time. */
+    HAL_Delay(10U);
+
+    /* Clear startup sticky command errors before first angle read. */
+    uint16_t errfl = 0U;
+    (void)as5047p_read_errfl_and_clear(dev, &errfl);
+    (void)as5047p_read_errfl_and_clear(dev, &errfl);
+
     uint16_t raw = 0U;
     AS5047P_Status_t st = AS5047P_ReadRawAngle(dev, &raw);
     if (st != AS5047P_OK) {
