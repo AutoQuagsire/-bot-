@@ -8,8 +8,9 @@
 #include "usb_debug.h"
 #include "usbd_cdc_if.h"
 #include "main.h"
+#include "PID.h"
+#include "INT.h"
 #include "pid_autotune.h"
-#include "sys.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>

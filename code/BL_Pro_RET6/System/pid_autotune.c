@@ -4,8 +4,11 @@
 #include "INT.h"
 #include "FOC.h"
 #include "usb_debug.h"
+#include "PID.h"
+#include "stm32g4xx_hal.h"
 
 #include <math.h>
+
 
 extern PID_t Left_Velocity_FOC_PID;
 extern float Left_Target;

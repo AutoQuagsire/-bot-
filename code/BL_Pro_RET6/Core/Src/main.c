@@ -118,11 +118,12 @@ int main(void)
   if (!App_FOCStack_Init()) {
       Error_Handler();
   }
-
+HAL_Delay(2000);
   if (!App_StartupCalibrate()) {
       Error_Handler();
   }
 
+  App_FOCControlIT_Enable();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -131,7 +132,7 @@ int main(void)
   {
     
     /* USER CODE END WHILE */
-    App_Loop();
+    DebuginWhile();
     /* USER CODE BEGIN 3 */
 
 

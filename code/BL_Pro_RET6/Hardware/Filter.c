@@ -15,6 +15,7 @@ void LowPassFilter_Init(LowPassFilter_t *lpf, float cutoff_freq, float sample_ra
 }
 
 // 低通滤波器更新
+__attribute__((optimize("O2,fast-math")))
 float LowPassFilter_Update(LowPassFilter_t *lpf, float x) {
     // 首次调用，直接使用输入值初始化
     if (!lpf->initialized) {

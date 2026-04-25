@@ -2,6 +2,7 @@
 #define __FOC_H
 
 #include <stdint.h>
+#include "tim.h"
 
 // ========== FOC控制频率配置（统一管理） ==========
 #define FOC_FREQUENCY       10000.0f        // FOC控制频率 (Hz)

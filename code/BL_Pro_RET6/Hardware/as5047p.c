@@ -365,15 +365,6 @@ AS5047P_Status AS5047P_GetAngle(AS5047P_Handle *dev)
     dev->angle_rad_with_track = (float)dev->full_rotations * 2.0f * PI + dev->angle_rad;
     return AS5047P_OK;
 }
-
-
-extern float zero_elec_angle;  /* 来自 main.c */
-float AS5047P_Get_ElecAngle(AS5047P_Handle *dev)
-{
-    AS5047P_GetAngleWithoutTrack(dev);
-    return normalizeAngle((float)(DIR * PolePair) * dev->angle_rad - zero_elec_angle);
-}
-
 __attribute__((optimize("O2")))
 float normalizeAngle(float angle)
 {

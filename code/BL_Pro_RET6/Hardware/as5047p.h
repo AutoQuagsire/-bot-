@@ -92,7 +92,6 @@ void           AS5047P_Init(AS5047P_Handle *dev,
 AS5047P_Status AS5047P_GetAngleWithoutTrack(AS5047P_Handle *dev);
 AS5047P_Status AS5047P_ReadAngle(AS5047P_Handle *dev);
 AS5047P_Status AS5047P_GetAngle(AS5047P_Handle *dev);
-float          AS5047P_Get_ElecAngle(AS5047P_Handle *dev);
 float          normalizeAngle(float angle);
 float          AS5047_GetVelocity(AS5047P_Handle *dev, float dt);
 

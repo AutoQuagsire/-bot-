@@ -1,9 +1,16 @@
 #include "app_foc.h"
+#include "FOC.h"
+#include "Filter.h"
 #include "main.h"
 #include "AS5047P_RW.h"
 #include "sensor.h"
 #include "driver.h"
 #include "BLDCMotor.h"
+#include "stm32g4xx_hal.h"
+#include "sys.h"
+#include <math.h>
+#include <stdint.h>
+#include "PID.h"
 
 /* 这些外设句柄由 CubeMX 生成并在别处定义
  * 这里用 extern 引用，供应用层初始化时使用 */
@@ -22,9 +29,186 @@ static Motor_t          g_motor1;   // 电机控制对象
 static Driver_t        *g_driver1 = NULL; // 三相驱动对象（由 Driver 模块提供实例）
 static uint32_t         g_last_loop_tick_ms = 0U;
 static uint32_t         g_last_print_tick_ms = 0U;
+static PID_t            g_speed_pid;
+LowPassFilter_t         g_speed_lpf1;
+
+PID_t Left_Velocity_FOC_PID;
+float Left_Target = 20.0f;
+
+static uint8_t          g_speed_fault = 0U;
 
 #define APP_LOOP_TEST_UQ_V        (1.0f)
 #define APP_LOOP_PRINT_PERIOD_MS  (100U)
+
+#define APP_SPEED_LOOP_ENABLE      (1U)
+#define APP_SPEED_TARGET_RAD_S     (20.0f)
+#define APP_SPEED_KP               (0.06f)
+#define APP_SPEED_KI               (0.00035f)
+#define APP_SPEED_KD               (0.0f)
+#define APP_SPEED_UQ_LIMIT         (8.0f)
+#define APP_SPEED_I_LIMIT          (4.0f)
+#define APP_SPEED_I_ERR_MIN        (0.05f)
+#define APP_SPEED_I_SEP_RATIO      (0.75f)
+#define APP_SPEED_VEL_FAULT_ABS    (80.0f)
+
+#define APP_MATRIX_ENABLE          (0U)
+#define APP_MATRIX_LEVEL_COUNT     (3U)
+#define APP_MATRIX_RUNS_PER_LEVEL  (3U)
+#define APP_MATRIX_SETTLE_MS       (1000U)
+#define APP_MATRIX_MEASURE_MS      (4000U)
+
+typedef struct {
+    float avg_abs_vel;
+    float max_abs_vel;
+    float avg_vel;
+    uint32_t sample_count;
+} AppMatrixResult_t;
+
+static const float g_matrix_uq_levels[APP_MATRIX_LEVEL_COUNT] = {0.5f, 1.0f, 1.5f};
+static AppMatrixResult_t g_matrix_results[APP_MATRIX_LEVEL_COUNT][APP_MATRIX_RUNS_PER_LEVEL];
+static uint8_t g_matrix_started = 0U;
+static uint8_t g_matrix_finished = 0U;
+static uint8_t g_matrix_level_idx = 0U;
+static uint8_t g_matrix_run_idx = 0U;
+static uint8_t g_matrix_phase = 0U; /* 0:settle, 1:measure */
+static uint32_t g_matrix_phase_start_ms = 0U;
+static float g_matrix_sum_abs_vel = 0.0f;
+static float g_matrix_max_abs_vel = 0.0f;
+static float g_matrix_sum_vel = 0.0f;
+static uint32_t g_matrix_samples = 0U;
+
+static void App_MatrixResetStats(void)
+{
+    g_matrix_sum_abs_vel = 0.0f;
+    g_matrix_max_abs_vel = 0.0f;
+    g_matrix_sum_vel = 0.0f;
+    g_matrix_samples = 0U;
+}
+
+static void App_MatrixPrintFinalSummary(void)
+{
+    uint8_t lv = 0U;
+
+    USB_Debug_Printf("[MATRIX] all runs finished\r\n");
+    for (lv = 0U; lv < APP_MATRIX_LEVEL_COUNT; lv++) {
+        float level_sum_avg_abs = 0.0f;
+        float level_max_abs = 0.0f;
+        float level_sum_avg_vel = 0.0f;
+        uint8_t rn = 0U;
+
+        for (rn = 0U; rn < APP_MATRIX_RUNS_PER_LEVEL; rn++) {
+            AppMatrixResult_t *r = &g_matrix_results[lv][rn];
+            level_sum_avg_abs += r->avg_abs_vel;
+            level_sum_avg_vel += r->avg_vel;
+            if (r->max_abs_vel > level_max_abs) {
+                level_max_abs = r->max_abs_vel;
+            }
+        }
+
+        USB_Debug_Printf("[MATRIX][L%u uq=%.2f] mean|vel|=%.3f peak|vel|=%.3f meanVel=%.3f\r\n",
+                         (unsigned)(lv + 1U),
+                         g_matrix_uq_levels[lv],
+                         level_sum_avg_abs / (float)APP_MATRIX_RUNS_PER_LEVEL,
+                         level_max_abs,
+                         level_sum_avg_vel / (float)APP_MATRIX_RUNS_PER_LEVEL);
+    }
+}
+
+static __attribute__((unused)) float App_MatrixStep(uint32_t now_ms, float vel)
+{
+    float uq = APP_LOOP_TEST_UQ_V;
+
+    if (g_matrix_finished) {
+        return 0.0f;
+    }
+
+    if (!g_matrix_started) {
+        g_matrix_started = 1U;
+        g_matrix_phase = 0U;
+        g_matrix_phase_start_ms = now_ms;
+        App_MatrixResetStats();
+        USB_Debug_Printf("[MATRIX] start levels=%u runs=%u settle=%ums measure=%ums\r\n",
+                         (unsigned)APP_MATRIX_LEVEL_COUNT,
+                         (unsigned)APP_MATRIX_RUNS_PER_LEVEL,
+                         (unsigned)APP_MATRIX_SETTLE_MS,
+                         (unsigned)APP_MATRIX_MEASURE_MS);
+    }
+
+    uq = g_matrix_uq_levels[g_matrix_level_idx];
+
+    if (g_matrix_phase == 0U) {
+        if ((now_ms - g_matrix_phase_start_ms) >= APP_MATRIX_SETTLE_MS) {
+            g_matrix_phase = 1U;
+            g_matrix_phase_start_ms = now_ms;
+            App_MatrixResetStats();
+            USB_Debug_Printf("[MATRIX] measure begin level=%u run=%u uq=%.2f\r\n",
+                             (unsigned)(g_matrix_level_idx + 1U),
+                             (unsigned)(g_matrix_run_idx + 1U),
+                             uq);
+        }
+        return uq;
+    }
+
+    if (g_matrix_phase == 1U) {
+        float abs_vel = fabsf(vel);
+        g_matrix_sum_abs_vel += abs_vel;
+        g_matrix_sum_vel += vel;
+        if (abs_vel > g_matrix_max_abs_vel) {
+            g_matrix_max_abs_vel = abs_vel;
+        }
+        g_matrix_samples++;
+
+        if ((now_ms - g_matrix_phase_start_ms) >= APP_MATRIX_MEASURE_MS) {
+            AppMatrixResult_t *r = &g_matrix_results[g_matrix_level_idx][g_matrix_run_idx];
+            const char *dir = ".";
+
+            r->sample_count = g_matrix_samples;
+            if (g_matrix_samples > 0U) {
+                r->avg_abs_vel = g_matrix_sum_abs_vel / (float)g_matrix_samples;
+                r->avg_vel = g_matrix_sum_vel / (float)g_matrix_samples;
+                r->max_abs_vel = g_matrix_max_abs_vel;
+            } else {
+                r->avg_abs_vel = 0.0f;
+                r->avg_vel = 0.0f;
+                r->max_abs_vel = 0.0f;
+            }
+
+            if (r->avg_vel > 0.05f) {
+                dir = "+";
+            } else if (r->avg_vel < -0.05f) {
+                dir = "-";
+            }
+
+            USB_Debug_Printf("[MATRIX][L%u R%u uq=%.2f] avg|vel|=%.3f max|vel|=%.3f avgVel=%.3f dir=%s n=%lu\r\n",
+                             (unsigned)(g_matrix_level_idx + 1U),
+                             (unsigned)(g_matrix_run_idx + 1U),
+                             uq,
+                             r->avg_abs_vel,
+                             r->max_abs_vel,
+                             r->avg_vel,
+                             dir,
+                             (unsigned long)r->sample_count);
+
+            g_matrix_run_idx++;
+            if (g_matrix_run_idx >= APP_MATRIX_RUNS_PER_LEVEL) {
+                g_matrix_run_idx = 0U;
+                g_matrix_level_idx++;
+            }
+
+            if (g_matrix_level_idx >= APP_MATRIX_LEVEL_COUNT) {
+                g_matrix_finished = 1U;
+                App_MatrixPrintFinalSummary();
+                return 0.0f;
+            }
+
+            g_matrix_phase = 0U;
+            g_matrix_phase_start_ms = now_ms;
+            App_MatrixResetStats();
+        }
+    }
+
+    return uq;
+}
 
 /**
  * @brief  FOC 应用层对象初始化
@@ -102,6 +286,28 @@ uint8_t App_FOCStack_Init(void)
     linkSensor(&g_sensor1, &g_motor1);
     linkDriver(g_driver1, &g_motor1);
 
+#if APP_SPEED_LOOP_ENABLE
+    g_speed_pid.error_integral = 0.0f;
+    g_speed_pid.last_error = 0.0f;
+    g_speed_pid.output = 0.0f;
+    g_speed_pid.output_limit = APP_SPEED_UQ_LIMIT;
+    g_speed_pid.I_ERR_MIN = APP_SPEED_I_ERR_MIN;
+    g_speed_pid.I_SEP_RATIO = APP_SPEED_I_SEP_RATIO;
+    PID_ParameterInitEx(&g_speed_pid,
+                        APP_SPEED_KP,
+                        APP_SPEED_KI,
+                        APP_SPEED_KD,
+                        APP_SPEED_I_LIMIT,
+                        APP_SPEED_UQ_LIMIT,
+                        APP_SPEED_I_ERR_MIN,
+                        APP_SPEED_I_SEP_RATIO);
+    Left_Velocity_FOC_PID = g_speed_pid;
+    Left_Target = APP_SPEED_TARGET_RAD_S;
+    g_speed_fault = 0U;
+    LowPassFilter_Init(&g_speed_lpf1, 100.0f, FOC_FREQUENCY);   
+
+#endif
+
     USB_Debug_Printf("FOC stack init ok\r\n");
     return 1U;
 }
@@ -164,15 +370,117 @@ void App_Loop(void)
         return;
     }
 
-    // 最小链路：传感器角度 -> 电角度 -> q轴测试电压输出
-    float test_elec_angle = g_motor1.electrical_angle + (PI * 0.5f);
-    Motor_SetPhaseVoltageQ(&g_motor1, APP_LOOP_TEST_UQ_V, test_elec_angle);
+    float elec_angle = g_motor1.electrical_angle;
+    float vel = Sensor_GetVelocityRaw(&g_sensor1);
+    float uq_cmd = APP_LOOP_TEST_UQ_V;
+    float vel_target = Left_Target;
+    float vel_error = vel_target - vel;
+
+#if APP_MATRIX_ENABLE
+    uq_cmd = App_MatrixStep(now_ms, vel);
+#endif
+
+#if APP_SPEED_LOOP_ENABLE
+    if (fabsf(vel) > APP_SPEED_VEL_FAULT_ABS) {
+        g_speed_fault = 1U;
+    }
+
+    if (!g_speed_fault) {
+        PID_Calculate(&g_speed_pid, vel_target, vel, 0U);
+        uq_cmd = g_speed_pid.output;
+    } else {
+        uq_cmd = 0.0f;
+    }
+#endif
+
+    Motor_SetPhaseVoltageQ(&g_motor1, uq_cmd, elec_angle);
 
     if ((now_ms - g_last_print_tick_ms) >= APP_LOOP_PRINT_PERIOD_MS) {
         g_last_print_tick_ms = now_ms;
-        USB_Debug_Printf("mech=%.4f elec=%.4f vel=%.3f\r\n",
+#if APP_SPEED_LOOP_ENABLE
+        USB_Debug_Printf("tgt=%.2f vel=%.3f err=%.3f uq=%.2f mech=%.4f elec=%.4f fault=%u\r\n",
+                         vel_target,
+                         vel,
+                         vel_error,
+                         uq_cmd,
                          Sensor_GetAngle(&g_sensor1),
                          g_motor1.electrical_angle,
-                         Sensor_GetVelocity(&g_sensor1));
+                         (unsigned)g_speed_fault);
+#else
+        USB_Debug_Printf("mech=%.4f elec=%.4f vel=%.3f uq=%.2f\r\n",
+                         Sensor_GetAngle(&g_sensor1),
+                         g_motor1.electrical_angle,
+                         vel,
+                         uq_cmd);
+#endif
     }
+}
+
+
+
+
+void App_FOCControlIT_Enable(void)
+{
+  HAL_TIM_Base_Start_IT(&htim5);
+}
+
+
+float vel = 0;
+float vel_windowed = 0;
+float vel_windowed_f = 0;
+//10Khz中断内部程序
+void App_LoopForIT(void)
+{
+
+    if (!Motor_UpdateSensor(&g_motor1, 0.0001f )) {
+        return;
+    }
+
+    float elec_angle = g_motor1.electrical_angle ;
+
+    float uq_cmd = APP_LOOP_TEST_UQ_V;
+    float vel_target = Left_Target;
+    vel = Sensor_GetVelocityRaw(&g_sensor1);
+    vel_windowed = Sensor_GetVelocityWindowed(&g_sensor1);
+    vel_windowed_f = LowPassFilter_Update(&g_speed_lpf1, vel);
+    float vel_error = vel_target - vel;
+
+    #if APP_SPEED_LOOP_ENABLE
+        if (fabsf(vel) > APP_SPEED_VEL_FAULT_ABS) {
+            g_speed_fault = 1U;
+        }
+
+        if (!g_speed_fault) {
+            PID_Calculate(&g_speed_pid, vel_target, vel_windowed_f, 0U);
+            uq_cmd = g_speed_pid.output;
+        } else {
+            uq_cmd = 0.0f;
+        }
+    #endif
+    Motor_SetPhaseVoltageQ(&g_motor1, uq_cmd, elec_angle);
+
+    Left_Velocity_FOC_PID = g_speed_pid;
+    pid_csv_data.timestamp_ms = HAL_GetTick();
+    pid_csv_data.setpoint = vel_target;
+    pid_csv_data.input = vel_windowed_f;
+    pid_csv_data.pwm = uq_cmd;
+    pid_csv_data.error = vel_target - vel_windowed_f;
+    pid_csv_data.p_term = g_speed_pid.Kp * pid_csv_data.error;
+    pid_csv_data.i_term = g_speed_pid.Ki * g_speed_pid.error_integral;
+    pid_csv_data.d_term = g_speed_pid.Kd * (pid_csv_data.error - g_speed_pid.last_error);
+
+}
+
+void DebuginWhile(void)
+{
+    static uint32_t last_print_ms = 0U;
+    uint32_t now_ms = HAL_GetTick();
+
+    if ((now_ms - last_print_ms) < 50U) {
+        return;
+    }
+
+    last_print_ms = now_ms;
+    USB_Debug_Printf("vel,windowed,filtered: %.2f, %.2f, %.2f\r\n", vel, vel_windowed, vel_windowed_f);
+
 }

@@ -3,6 +3,25 @@
 #include "./current_sense.h"
 #include "./platform.h"
 
+#if defined(__has_attribute)
+  #if __has_attribute(optimize)
+    #define ATTR_OPT_FAST __attribute__((optimize("O2,fast-math")))
+  #else
+    #define ATTR_OPT_FAST
+  #endif
+#else
+  #define ATTR_OPT_FAST
+#endif
+
+#if defined(__has_attribute)
+  #if __has_attribute(always_inline)
+    #define ATTR_ALWAYS_INLINE __attribute__((always_inline)) inline
+  #else
+    #define ATTR_ALWAYS_INLINE inline
+  #endif
+#else
+  #define ATTR_ALWAYS_INLINE inline
+#endif
 
 
 
@@ -49,7 +68,7 @@ void linkSensor(Sensor_t *sensor, Motor_t *motor)
 （5）整理电机参数
     如果只给了单个相电感 phase_inductance，但没有单独给 d/q 轴电感，它就把 d/q 都设成这个值。
 
-    这是个很典型的“初始化期参数整理”。    
+    这是个很典型的“初始化期参数整理”。
 （6）如果是开环而且没传感器，就给默认方向
 
     如果：
@@ -60,7 +79,7 @@ void linkSensor(Sensor_t *sensor, Motor_t *motor)
 
     它就默认 sensor_direction = CW
 
-    这一步本质上是在补齐运行前提。    
+    这一步本质上是在补齐运行前提。
 （7）延时后调用 enable()
     这个很关键：
     init() 最后会：
@@ -68,7 +87,7 @@ void linkSensor(Sensor_t *sensor, Motor_t *motor)
     enable()
     再延时
     把状态设成 motor_uncalibrated
-*/ 
+*/
 uint8_t FOCMotor_init(Motor_t *FOC_Motor)
 {
     if (!FOC_Motor) {
@@ -202,7 +221,7 @@ void FOCMotor_enable(Motor_t *motor)
 
 
 
-void MotorParam_Init(Motor_t *motor, float pole_pairs, float phase_resistance, 
+void MotorParam_Init(Motor_t *motor, float pole_pairs, float phase_resistance,
                     float kv, float Ld, float Lq)
 {
     if (!motor) return;
@@ -215,11 +234,25 @@ void MotorParam_Init(Motor_t *motor, float pole_pairs, float phase_resistance,
 
 }
 
-
+ATTR_OPT_FAST
 static float normalize_angle_0_2pi(float angle)
 {
     float a = angle - (float)(int32_t)(angle * (1.0f / (2.0f * PI))) * (2.0f * PI);
     return (a >= 0.0f) ? a : (a + 2.0f * PI);
+}
+
+ATTR_OPT_FAST
+static ATTR_ALWAYS_INLINE float Motor_CalcElectricalAngleUnchecked(const Motor_t *motor, const Sensor_t *sensor)
+{
+    float mech_angle = sensor->data.shaft_angle;
+    float pole_pairs = motor->param.pole_pairs;
+
+    if (motor->state.sensor_direction == sensor_direction_ccw) {
+        pole_pairs = -pole_pairs;
+    }
+
+    float elec_angle = pole_pairs * mech_angle - motor->zero_electrical_angle;
+    return normalize_angle_0_2pi(elec_angle);
 }
 
 
@@ -236,28 +269,19 @@ float Motor_GetMechanicalAngle(Motor_t *motor)
     return Sensor_GetAngle(motor->sensor);
 }
 
-
+ATTR_OPT_FAST
 float Motor_GetElectricalAngle(Motor_t *motor)
 {
-    if (!motor || !motor->sensor) {
+    if (!motor) {
         return 0.0f;
     }
 
-    if (!(motor->sensor->initialized)) {
+    Sensor_t *sensor = motor->sensor;
+    if (!sensor || !sensor->initialized) {
         return 0.0f;
     }
 
-    float mech_angle = Sensor_GetAngle(motor->sensor);
-
-    float direction_sign = 1.0f;
-    if (motor->state.sensor_direction == sensor_direction_ccw) {
-        direction_sign = -1.0f;
-    }
-
-    float elec_angle = direction_sign * motor->param.pole_pairs * mech_angle
-                     - motor->zero_electrical_angle;
-
-    return normalize_angle_0_2pi(elec_angle);
+    return Motor_CalcElectricalAngleUnchecked(motor, sensor);
 }
 
 
@@ -271,9 +295,12 @@ uint8_t Motor_UpdateSensor(Motor_t *motor, float dt)
     if (!(motor->sensor->initialized)) {
         return 0U;
     }
-
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
     Sensor_Update(motor->sensor, dt);
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+
     motor->electrical_angle = Motor_GetElectricalAngle(motor);
+
 
     return 1U;
 }
@@ -384,11 +411,15 @@ uint8_t Motor_CalibrateZeroElectricalAngle(Motor_t *motor,
         dir = -1.0f;
     }
 
+    float theta_field = normalize_angle_0_2pi(align_angle + 0.5f * PI);
     motor->zero_electrical_angle =
-        normalize_angle_0_2pi(dir * motor->param.pole_pairs * mech_align - align_angle);
+        normalize_angle_0_2pi(dir * motor->param.pole_pairs * mech_align - theta_field);
 
     // 6. 去掉输出
     Driver_SetPwm(motor->driver, 0.0f, 0.0f, 0.0f);
 
     return 1U;
 }
+
+
+

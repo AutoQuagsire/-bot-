@@ -16,12 +16,32 @@ typedef enum {
 } SensorType_t;
 
 
+
+
+#define SENSOR_VEL_WIN_NUMBER 5U
+#define SENSOR_VEL_WIN_MAX (SENSOR_VEL_WIN_NUMBER+1U)
+
+typedef struct {
+ uint8_t  vel_win_size;                 // N
+    uint8_t  vel_win_head;                 // ring head
+    uint8_t  vel_win_count;                // valid count
+    float    vel_win_sum_dt;               // sum(dt) in window
+    float    vel_angle_track_buf[SENSOR_VEL_WIN_MAX];
+    float    vel_dt_buf[SENSOR_VEL_WIN_MAX];
+} velocity_windowed_t;
+
+
+
 /* 传感器公共输出数据 */
 typedef struct {
     float shaft_angle;         // 单圈机械角 [0, 2pi)
     float shaft_angle_track;   // 连续机械角
     float shaft_velocity;      // 机械角速度 [rad/s]
+    float shaft_velocity_windowed; // 窗口平均机械角速度 [rad/s]
+    int rotations;             // 完整转数，正数表示正向，负数表示反向
 } SensorData_t;
+
+
 
 
 /* 统一传感器对象 */
@@ -32,6 +52,7 @@ typedef struct {
     void *dev;
     uint8_t test;
     SensorData_t data;
+    velocity_windowed_t velocity_windowed;   // 窗口测速相关数据
 
     float init_angle;         // init阶段读到的初始机械角
     float last_angle;         // 上一次update用于速度计算的角度
@@ -51,6 +72,7 @@ void Sensor_Update(Sensor_t *sensor, float dt);
 /* 获取公共数据 */
 float Sensor_GetAngle(Sensor_t *sensor);
 float Sensor_GetAngleTrack(Sensor_t *sensor);
-float Sensor_GetVelocity(Sensor_t *sensor);
+float Sensor_GetVelocityRaw(Sensor_t *sensor);
+float Sensor_GetVelocityWindowed(Sensor_t *sensor);
 
 #endif
