@@ -37,8 +37,8 @@
 
 
 
-#define _shunt_resistor 0.02f  // 电流采样分流电阻 (Ω)
-#define amp_gain        20     // INA240 运放放大倍数
+#define FOC_SHUNT_RESISTOR_OHM 0.02f  // 电流采样分流电阻 (Ω)
+#define FOC_AMP_GAIN           20     // INA240 运放放大倍数
 #define RIGHT_ADC_SWAP_AB 0    // 右路ADC通道A/B互换：0=不换，1=互换
 #define RIGHT_IA_SIGN    1.0f  // 右路Ia符号：接反时改为-1.0f
 #define RIGHT_IB_SIGN    1.0f  // 右路Ib符号：接反时改为-1.0f

@@ -201,7 +201,7 @@ void CurrentSenser_Init(void)
     USB_Debug_Printf("R offset: ia=%.4fV, ib=%.4fV\r\n", R_offset_ia, R_offset_ib);
     
     /* Calculate voltage-to-current conversion factor and per-channel gain */
-    vlots_to_amps = 1.0f / _shunt_resistor / amp_gain;
+    vlots_to_amps = 1.0f / FOC_SHUNT_RESISTOR_OHM / FOC_AMP_GAIN;
     gain = vlots_to_amps;
     USB_Debug_Printf("v2i_factor=%.2f, gain=%.2f\r\n", vlots_to_amps, gain);
  

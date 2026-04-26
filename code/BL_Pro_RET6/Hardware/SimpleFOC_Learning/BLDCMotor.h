@@ -105,6 +105,7 @@ typedef struct {
 
 void linkDriver(Driver_t *driver, Motor_t *motor);
 void linkSensor(Sensor_t *sensor, Motor_t *motor);
+void linkCurrentSense(CurrentSense_t *Current_Sense, Motor_t *motor);
 
 uint8_t FOCMotor_init(Motor_t *FOC_Motor);
 void MotorParam_Init(Motor_t *motor, float pole_pairs, float phase_resistance, 
