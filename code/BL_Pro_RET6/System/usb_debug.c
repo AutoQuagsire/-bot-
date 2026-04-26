@@ -359,12 +359,30 @@ static volatile uint8_t usb_rx_overflow = 0;
 /* ── 内部发送（单次尝试，绝不阻塞主循环）────────────────────────── */
 static void send_blocking(const uint8_t *buf, uint16_t len)
 {
-    int ret = CDC_Transmit_FS((uint8_t *)buf, len);
-    if (ret == USBD_BUSY)
+    uint32_t t0 = HAL_GetTick();
+    int ret;
+
+    if (buf == NULL || len == 0U)
+        return;
+
+    do
     {
-        /* 记录 BUSY 次数，便于诊断 */
-        usb_debug_busy_count++;
+        ret = CDC_Transmit_FS((uint8_t *)buf, len);
+        if (ret == USBD_OK)
+            return;
+
+        if (ret == USBD_BUSY)
+        {
+            /* 记录 BUSY 次数，便于诊断 */
+            usb_debug_busy_count++;
+        }
+        else
+        {
+            /* 其他错误直接退出，避免无意义重试 */
+            return;
+        }
     }
+    while ((HAL_GetTick() - t0) < USB_DEBUG_TIMEOUT_MS);
 }
 
 /* ── 公开函数 ────────────────────────────────────────────────────── */

@@ -122,7 +122,8 @@ int main(void)
   if (!App_StartupCalibrate()) {
       Error_Handler();
   }
-  App_CurrentSenseSignTest();   // 看串口建议
+  //App_CurrentSenseSignTest();   // 看串口建议
+  App_SensorDirectionTest();
   //App_FOCControlIT_Enable();
   /* USER CODE END 2 */
 

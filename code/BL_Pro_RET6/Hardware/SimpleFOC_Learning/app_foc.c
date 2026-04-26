@@ -95,6 +95,11 @@ float Left_Target = 20.0f;
 #define APP_CS_SIGN_TEST_SAMPLE_DT_MS (1U)
 #define APP_CS_SIGN_TEST_DEADBAND_A   (0.03f)
 
+#define APP_SENSOR_DIR_TEST_UQ_V         (4.0f)
+#define APP_SENSOR_DIR_TEST_SETTLE_MS    (500U)
+#define APP_SENSOR_DIR_TEST_ELEC_STEP    (PI * 0.5f)
+#define APP_SENSOR_DIR_TEST_DEADBAND_RAD (0.02f)
+#define APP_SENSOR_DIR_TEST_MAX_STEP_MS  (2500U)
 
 
 
@@ -609,6 +614,141 @@ void App_CurrentSenseSignTest(void)
 #endif
 
     USB_Debug_Printf("[CS-SIGN] test end\r\n");
+}
+
+static float app_angle_diff_signed(float from, float to)
+{
+    float d = to - from;
+    while (d > PI) {
+        d -= 2.0f * PI;
+    }
+    while (d < -PI) {
+        d += 2.0f * PI;
+    }
+    return d;
+}
+
+static float app_sensor_angle_after_settle(Motor_t *motor,
+                                           Sensor_t *sensor,
+                                           float uq,
+                                           float elec_angle,
+                                           uint32_t settle_ms)
+{
+    uint32_t i;
+    uint32_t step_ms;
+    uint32_t t0;
+    uint32_t t1;
+    uint32_t ticks_per_ms;
+
+    Motor_SetPhaseVoltageQ(motor, uq, elec_angle);
+
+    ticks_per_ms = SystemCoreClock / 1000U;
+    if (ticks_per_ms == 0U) {
+        ticks_per_ms = 1U;
+    }
+
+    step_ms = settle_ms;
+    if (step_ms > APP_SENSOR_DIR_TEST_MAX_STEP_MS) {
+        step_ms = APP_SENSOR_DIR_TEST_MAX_STEP_MS;
+    }
+
+    for (i = 0U; i < step_ms; i++) {
+        Sensor_Update(sensor, 0.001f);
+        t0 = DWT_GetTicks();
+        do {
+            t1 = DWT_GetElapsedTicks(t0);
+        } while (t1 < ticks_per_ms);
+    }
+
+    Sensor_Update(sensor, 0.001f);
+    return Sensor_GetAngle(sensor);
+}
+
+static void app_sensor_direction_test_one(const char *tag, Motor_t *motor, Sensor_t *sensor)
+{
+    uint8_t was_enabled;
+    float uq = APP_SENSOR_DIR_TEST_UQ_V;
+    float a0;
+    float ap;
+    float an;
+    float dp;
+    float dn;
+    int8_t score = 0;
+
+    if ((motor == NULL) || (sensor == NULL) || (motor->driver == NULL) || (!motor->driver->initialized) || (!sensor->initialized)) {
+        USB_Debug_Printf("[DIR-TEST][%s] skip (motor/sensor not ready)\r\n", tag);
+        return;
+    }
+
+    was_enabled = (uint8_t)motor->state.enabled;
+    if (!was_enabled) {
+        FOCMotor_enable(motor);
+        HAL_Delay(10);
+    }
+
+    if ((motor->driver->voltage_limit > 0.0f) && (uq > motor->driver->voltage_limit * 0.3f)) {
+        uq = motor->driver->voltage_limit * 0.3f;
+    }
+    if (uq < 0.3f) {
+        uq = 0.3f;
+    }
+
+    USB_Debug_Printf("[DIR-TEST][%s] start uq=%.2fV elec_step=%.3f\r\n", tag, uq, APP_SENSOR_DIR_TEST_ELEC_STEP);
+
+    USB_Debug_Printf("[DIR-TEST][%s] step a0...\r\n", tag);
+    a0 = app_sensor_angle_after_settle(motor, sensor, uq, 0.0f, APP_SENSOR_DIR_TEST_SETTLE_MS);
+    USB_Debug_Printf("[DIR-TEST][%s] step +elec...\r\n", tag);
+    ap = app_sensor_angle_after_settle(motor, sensor, uq, APP_SENSOR_DIR_TEST_ELEC_STEP, APP_SENSOR_DIR_TEST_SETTLE_MS);
+    USB_Debug_Printf("[DIR-TEST][%s] step -elec...\r\n", tag);
+    an = app_sensor_angle_after_settle(motor, sensor, uq, -APP_SENSOR_DIR_TEST_ELEC_STEP, APP_SENSOR_DIR_TEST_SETTLE_MS);
+    USB_Debug_Printf("[DIR-TEST][%s] step done\r\n", tag);
+
+    Motor_SetPhaseVoltageQ(motor, 0.0f, 0.0f);
+
+    dp = app_angle_diff_signed(a0, ap);  /* +elec step */
+    dn = app_angle_diff_signed(a0, an);  /* -elec step */
+
+    if (dp > APP_SENSOR_DIR_TEST_DEADBAND_RAD) {
+        score++;
+    } else if (dp < -APP_SENSOR_DIR_TEST_DEADBAND_RAD) {
+        score--;
+    }
+
+    if (dn < -APP_SENSOR_DIR_TEST_DEADBAND_RAD) {
+        score++;
+    } else if (dn > APP_SENSOR_DIR_TEST_DEADBAND_RAD) {
+        score--;
+    }
+
+    USB_Debug_Printf("[DIR-TEST][%s] a0=%.4f ap=%.4f an=%.4f d_plus=%.4f d_minus=%.4f\r\n",
+                     tag, a0, ap, an, dp, dn);
+
+    if (score > 0) {
+        USB_Debug_Printf("[DIR-TEST][%s] recommendation: sensor_direction_cw\r\n", tag);
+    } else if (score < 0) {
+        USB_Debug_Printf("[DIR-TEST][%s] recommendation: sensor_direction_ccw\r\n", tag);
+    } else {
+        USB_Debug_Printf("[DIR-TEST][%s] recommendation: inconclusive (increase uq/settle time and retest)\r\n", tag);
+    }
+
+    if (!was_enabled) {
+        FOCMotor_disable(motor);
+    }
+}
+
+void App_SensorDirectionTest(void)
+{
+    USB_Debug_Printf("[DIR-TEST] begin (motor should be free to move, not held)\r\n");
+
+#if LEFT_MOTOR_ENABLE
+    app_sensor_direction_test_one("L", &g_motor1, &g_sensor1);
+#endif
+
+#if RIGHT_MOTOR_ENABLE
+    app_sensor_direction_test_one("R", &g_motor2, &g_sensor2);
+#endif
+
+    USB_Debug_Printf("[DIR-TEST] end\r\n");
 }
 
 void App_Loop(void)
