@@ -9,19 +9,19 @@
 #include "usbd_cdc_if.h"
 #include "main.h"
 #include "PID.h"
+#include "app_foc.h"
 #include "INT.h"
-#include "pid_autotune.h"
+
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
 
 extern float Left_Target;
-extern PID_t Left_Velocity_FOC_PID;
 
 #define TUNE_TARGET        Left_Target
-#define TUNE_SPEED_PID     Left_Velocity_FOC_PID
-#define TUNE_SIDE_NAME     "LEFT_SPEED"
+#define TUNE_SIDE_NAME     "CURRENT_LR"
+#define TUNE_TARGET_NAME   "LEFT_SPEED"
 
 /* PID参数接收范围（与参考firmware.cpp一致） */
 #define PID_KP_MAX 100.0f
@@ -39,17 +39,6 @@ static float pid_update_ack_ki = 0.0f;
 static float pid_update_ack_kd = 0.0f;
 static float pid_update_ack_ilim = 0.0f;
 
-#if PID_FAST_LOG_ENABLE
-static void arm_fastlog_capture(void)
-{
-    __disable_irq();
-    pid_fast_log_count = 0U;
-    pid_fast_log_full = 0U;
-    pid_fast_log_capture_enable = 1U;
-    __enable_irq();
-}
-#endif
-
 static void process_pid_update_motor_holdoff(void)
 {
     if (!pid_update_motor_holdoff_active)
@@ -60,12 +49,15 @@ static void process_pid_update_motor_holdoff(void)
         HAL_GPIO_WritePin(Motor_EN_GPIO_Port, Motor_EN_Pin, GPIO_PIN_RESET);
         pid_update_motor_holdoff_active = 0U;
         USB_Debug_Printf("# Motor driver re-enabled after command update holdoff\r\n");
+        App_ResetSpeedPIDs();
+        App_ResetCurrentPIDs();
 
         if (pid_update_ack_pending)
         {
-            USB_Debug_Printf("# PID Updated: P=%.4f I=%.6f D=%.6f ILim=%.4f\r\n",
+            USB_Debug_Printf("# Current PID(L/R) Updated: P=%.4f I=%.6f D=%.6f ILim=%.4f\r\n",
                              pid_update_ack_kp,
                              pid_update_ack_ki,
+                             
                              pid_update_ack_kd,
                              pid_update_ack_ilim);
             USB_Debug_Printf("# PID update ack delayed by %lu ms\r\n",
@@ -76,10 +68,13 @@ static void process_pid_update_motor_holdoff(void)
         if (pid_update_fastlog_pending)
         {
     #if PID_FAST_LOG_ENABLE
-            arm_fastlog_capture();
+            if (App_TryArmFastLog()) {
+                USB_Debug_Printf("# FASTLOG auto-armed after command update, cap=%u\r\n",
+                                 (unsigned int)PID_FAST_LOG_CAPACITY);
+            } else {
+                USB_Debug_Printf("# FASTLOG auto-arm skipped: previous capture not exported yet\r\n");
+            }
             pid_update_fastlog_pending = 0U;
-            USB_Debug_Printf("# FASTLOG auto-armed after PID update, cap=%u\r\n",
-                     (unsigned int)PID_FAST_LOG_CAPACITY);
     #else
             pid_update_fastlog_pending = 0U;
             USB_Debug_Printf("# FASTLOG disabled (PID_FAST_LOG_ENABLE=0)\r\n");
@@ -98,7 +93,9 @@ static void trigger_pid_update_motor_holdoff(void)
 
 static void apply_pid_and_ack(float kp, float ki, float kd, float ilim)
 {
-    float final_ilim = TUNE_SPEED_PID.integral_limit;
+    float final_ilim = 0.0f;
+
+    App_CurrentPID_GetSame(NULL, NULL, NULL, &final_ilim);
 
     if (kp < -PID_KP_MAX || kp > PID_KP_MAX ||
         ki < -PID_KI_MAX || ki > PID_KI_MAX ||
@@ -119,9 +116,7 @@ static void apply_pid_and_ack(float kp, float ki, float kd, float ilim)
     }
 
     /* 支持可选更新积分限幅；并清状态避免突变 */
-    PID_ParameterInit(&TUNE_SPEED_PID, kp, ki, kd, final_ilim);
-    TUNE_SPEED_PID.error_integral = 0.0f;
-    TUNE_SPEED_PID.last_error = 0.0f;
+    App_CurrentPID_SetSame(kp, ki, kd, final_ilim);
     trigger_pid_update_motor_holdoff();
 #if PID_FAST_LOG_ENABLE
     pid_update_fastlog_pending = 1U;
@@ -135,6 +130,25 @@ static void apply_pid_and_ack(float kp, float ki, float kd, float ilim)
     pid_update_ack_pending = 1U;
 
     USB_Debug_Printf("# Motor driver disabled for %lu ms after PID update\r\n", (uint32_t)PID_UPDATE_MOTOR_HOLDOFF_MS);
+}
+
+static void apply_target_and_ack(float target)
+{
+    TUNE_TARGET = target;
+    App_ResetSpeedPIDs();
+    App_ResetCurrentPIDs();
+#if PID_FAST_LOG_ENABLE
+    if (App_TryArmFastLog()) {
+        USB_Debug_Printf("# FASTLOG auto-armed after target update, cap=%u\r\n",
+                         (unsigned int)PID_FAST_LOG_CAPACITY);
+    } else {
+        USB_Debug_Printf("# FASTLOG auto-arm skipped: previous capture not exported yet\r\n");
+    }
+#else
+    USB_Debug_Printf("# FASTLOG disabled (PID_FAST_LOG_ENABLE=0)\r\n");
+#endif
+
+    USB_Debug_Printf("# Target(%s) updated%.4f\r\n", TUNE_TARGET_NAME, TUNE_TARGET);
 }
 
 static uint8_t parse_pid_values(const char *payload, float *kp, float *ki, float *kd, float *ilim)
@@ -228,31 +242,16 @@ static void handle_one_command(const char *cmd)
     if (cmd == NULL || cmd[0] == '\0')
         return;
 
-    if (strncmp(cmd, "autotune:start", 14) == 0)
-    {
-        PID_AutoTune_Start();
-        return;
-    }
-
-    if (strncmp(cmd, "autotune:stop", 13) == 0)
-    {
-        PID_AutoTune_Stop();
-        USB_Debug_Printf("AUTOTUNE stop command received\r\n");
-        return;
-    }
-
-    if (strncmp(cmd, "autotune:status", 15) == 0)
-    {
-        USB_Debug_Printf("AUTOTUNE status: %s\r\n", PID_AutoTune_IsActive() ? "active" : "idle");
-        return;
-    }
 
     if (strncmp(cmd, "fastlog:arm", 11) == 0)
     {
 #if PID_FAST_LOG_ENABLE
-        arm_fastlog_capture();
+        if (App_TryArmFastLog()) {
+            USB_Debug_Printf("# FASTLOG armed, cap=%u\r\n", (unsigned int)PID_FAST_LOG_CAPACITY);
+        } else {
+            USB_Debug_Printf("# FASTLOG arm rejected: previous capture not exported yet\r\n");
+        }
         pid_update_fastlog_pending = 0U;
-        USB_Debug_Printf("# FASTLOG armed, cap=%u\r\n", (unsigned int)PID_FAST_LOG_CAPACITY);
 #else
         USB_Debug_Printf("# FASTLOG disabled (PID_FAST_LOG_ENABLE=0)\r\n");
 #endif
@@ -262,7 +261,7 @@ static void handle_one_command(const char *cmd)
     if (strncmp(cmd, "fastlog:stop", 12) == 0)
     {
 #if PID_FAST_LOG_ENABLE
-        pid_fast_log_capture_enable = 0U;
+        App_StopFastLog();
         pid_update_fastlog_pending = 0U;
         USB_Debug_Printf("# FASTLOG capture stopped\r\n");
 #else
@@ -274,11 +273,20 @@ static void handle_one_command(const char *cmd)
     if (strncmp(cmd, "fastlog:status", 14) == 0)
     {
 #if PID_FAST_LOG_ENABLE
-        USB_Debug_Printf("# FASTLOG status: arm=%u full=%u count=%u/%u\r\n",
-                         (unsigned int)pid_fast_log_capture_enable,
-                         (unsigned int)pid_fast_log_full,
-                         (unsigned int)pid_fast_log_count,
-                         (unsigned int)PID_FAST_LOG_CAPACITY);
+        uint16_t sample_count = 0U;
+        uint8_t armed = 0U;
+        uint8_t done = 0U;
+        uint32_t capture_id = 0U;
+        uint8_t blocked = 0U;
+
+        App_GetFastLogStatus(&sample_count, &armed, &done, &capture_id, &blocked);
+        USB_Debug_Printf("# FASTLOG status: arm=%u done=%u count=%u/%u capture=%lu blocked=%u\r\n",
+                         (unsigned int)armed,
+                         (unsigned int)done,
+                         (unsigned int)sample_count,
+                         (unsigned int)PID_FAST_LOG_CAPACITY,
+                         (unsigned long)capture_id,
+                         (unsigned int)blocked);
 #else
         USB_Debug_Printf("# FASTLOG disabled (PID_FAST_LOG_ENABLE=0)\r\n");
 #endif
@@ -303,6 +311,14 @@ static void handle_one_command(const char *cmd)
         return;
     }
 
+    if (strncmp(cmd, "PID MODE", 8) == 0)
+    {
+        g_current_pid_mode = (g_current_pid_mode == 0U) ? 1U : 0U;
+        USB_Debug_Printf("# Current PID mode switched to: %s\r\n",
+                         (g_current_pid_mode == 0U) ? "CurrentLoop_FFPI_V1" : "Pure PI compare");
+        return;
+    }
+
     if (strncmp(cmd, "PID ", 4) == 0)
     {
         if (parse_pid_values(cmd + 4, &kp, &ki, &kd, &ilim))
@@ -318,10 +334,39 @@ static void handle_one_command(const char *cmd)
 
     if (strncmp(cmd, "STATUS", 6) == 0)
     {
-        USB_Debug_Printf("# STATUS(%s): Kp=%.4f Ki=%.6f Kd=%.6f ILim=%.4f Target=%.3f\r\n",
+        float cur_kp;
+        float cur_ki;
+        float cur_kd;
+        float cur_ilim;
+        float sched_ff = 0.0f;
+        float sched_ilim = 0.0f;
+
+        App_CurrentPID_GetSame(&cur_kp, &cur_ki, &cur_kd, &cur_ilim);
+        CurrentLoop_GetScheduledParams(TUNE_TARGET, &sched_ff, &sched_ilim);
+        USB_Debug_Printf("# STATUS(%s): Kp=%.4f Ki=%.6f Kd=%.6f ILim=%.4f FFMode=%u FFcoef=%.4f SchedILim=%.4f TargetIq=%.3f\r\n",
                          TUNE_SIDE_NAME,
-                         TUNE_SPEED_PID.Kp, TUNE_SPEED_PID.Ki, TUNE_SPEED_PID.Kd,
-                         TUNE_SPEED_PID.integral_limit, TUNE_TARGET);
+                         cur_kp, cur_ki, cur_kd,
+                         cur_ilim,
+                         (unsigned)(g_current_pid_mode == 0U),
+                         sched_ff,
+                         sched_ilim,
+                         TUNE_TARGET);
+        return;
+    }
+
+    /* 检查格式 "KFEED:" */
+    if (strncmp(cmd, "KFEED:", 6) == 0)
+    {
+        (void)strtof(cmd + 6, NULL);
+        USB_Debug_Printf("# KFEED is deprecated in CurrentLoop_FFPI_V1; ff_coef is scheduled by |Iq_ref|\r\n");
+        return;
+    }
+
+    if (strncmp(cmd, "PID RESET", 9) == 0)
+    {
+        App_ResetCurrentPIDs();
+        App_ResetSpeedPIDs();
+        USB_Debug_Printf("# PID runtime state reset\r\n");
         return;
     }
 
@@ -339,13 +384,12 @@ static void handle_one_command(const char *cmd)
         }
         value_str[j] = '\0';
 
-        TUNE_TARGET = strtof((const char *)value_str, NULL);
-        USB_Debug_Printf("Target(%s) updated: %.2f\r\n", TUNE_SIDE_NAME, TUNE_TARGET);
+        apply_target_and_ack(strtof((const char *)value_str, NULL));
         return;
     }
 
     USB_Debug_Printf("Unknown cmd: %s\r\n", cmd);
-    USB_Debug_Printf("Cmd list: tgt:<value> | SET P:x I:y D:z [L:l] | SET KP:x KI:y KD:z [ILIM:l] | PID x y z [l] | STATUS | autotune:start|stop|status | fastlog:arm|stop|status\r\n");
+    USB_Debug_Printf("Cmd list: tgt:<value> | SET/PID tunes current PID L/R same: SET P:x I:y D:z [L:l] | PID x y z [l] | STATUS | PID MODE | PID RESET | fastlog:arm|stop|status\r\n");
 }
 
 /* 诊断计数：记录 CDC_Transmit_FS 返回 USBD_BUSY 的次数 */

@@ -47,7 +47,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     System/usb_debug.c
-    System/pid_autotune.c
+
     System/sys.c
     System/INT.c
     Hardware/as5047p.c

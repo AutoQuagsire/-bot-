@@ -69,6 +69,7 @@ void USB_RxCallback(uint8_t* buf, uint32_t len);
  */
 void Process_USB_Command(void);
 
+
 #ifdef __cplusplus
 }
 #endif

@@ -7,6 +7,49 @@
 #include "current_sense.h"
 #include "sensor.h"
 
+#ifndef CURRENT_LOOP_USE_FEEDFORWARD
+#define CURRENT_LOOP_USE_FEEDFORWARD 1
+#endif
+
+#ifndef CURRENT_LOOP_I_SEP_RATIO
+#define CURRENT_LOOP_I_SEP_RATIO 0.15f
+#endif
+
+#ifndef CURRENT_LOOP_PURE_PI_I_SEP_RATIO
+#define CURRENT_LOOP_PURE_PI_I_SEP_RATIO 0.75f
+#endif
+
+/*
+ * CurrentLoop_FFPI_V1
+ *
+ * The current loop uses a feedforward PI structure:
+ *   Uq = PI(Iq_ref - Iq_meas) + Iq_ref * R_phase * ff_coef
+ *
+ * ff_coef and integral_limit are scheduled by |Iq_ref|.
+ * Feedforward provides the basic voltage estimate, while PI only
+ * corrects dynamic error and residual steady-state error.
+ *
+ * Pure PI is kept only for comparison/debugging.
+ */
+typedef struct {
+    float iq_abs;
+    float ff_coef;
+    float integral_limit;
+} CurrentLoopSchedulePoint_t;
+
+typedef struct {
+    float target_iq;
+    float filtered_iq;
+    float raw_iq;
+    float error;
+    float pi_out;
+    float ff_term;
+    float uq_final;
+    float ff_coef;
+    float integral_limit;
+    float pid_integral;
+} CurrentLoopDebugSnapshot_t;
+
 
 
 //==================== 电机物理参数 ====================
@@ -118,6 +161,9 @@ float Motor_GetElectricalAngle(Motor_t *motor);
 uint8_t Motor_UpdateSensor(Motor_t *motor, float dt);
 void Motor_SetPhaseVoltageQ(Motor_t *motor, float uq, float elec_angle);
 void Motor_SetPhaseVoltageQBySinCos(Motor_t *motor, float uq, float sin_el, float cos_el);
+void CurrentLoop_GetScheduledParams(float target_iq,
+                                    float *ff_coef,
+                                    float *integral_limit);
 
 uint8_t Motor_CalibrateZeroElectricalAngle(Motor_t *motor,
                                            float align_voltage,

@@ -2,6 +2,8 @@
 #include "./driver.h"
 #include "./current_sense.h"
 #include "./platform.h"
+#include <math.h>
+#include <stddef.h>
 
 #if defined(__has_attribute)
   #if __has_attribute(optimize)
@@ -27,6 +29,68 @@
 
 
 //预留代码：实现功能：把一个驱动器对象的指针，挂到电机对象�?
+static const CurrentLoopSchedulePoint_t current_loop_schedule_table[] = {
+    {0.03f, 0.400f, 0.080f},
+    {0.10f, 0.475f, 0.125f},
+    {0.30f, 0.465f, 0.350f},
+    {0.60f, 0.525f, 0.300f},
+    {0.90f, 0.550f, 0.500f},
+    {1.20f, 0.550f, 0.700f},
+    {1.50f, 0.550f, 0.650f},
+    {1.80f, 0.550f, 0.650f},
+};
+
+static ATTR_ALWAYS_INLINE float current_loop_lerp(float a, float b, float t)
+{
+    return a + (b - a) * t;
+}
+
+void CurrentLoop_GetScheduledParams(float target_iq,
+                                    float *ff_coef,
+                                    float *integral_limit)
+{
+    const size_t table_size = sizeof(current_loop_schedule_table) / sizeof(current_loop_schedule_table[0]);
+    const CurrentLoopSchedulePoint_t *last_point;
+    float iq_abs;
+    size_t idx;
+
+    if ((ff_coef == NULL) || (integral_limit == NULL) || (table_size == 0U)) {
+        return;
+    }
+
+    iq_abs = fabsf(target_iq);
+    last_point = &current_loop_schedule_table[table_size - 1U];
+
+    if (iq_abs <= current_loop_schedule_table[0].iq_abs) {
+        *ff_coef = current_loop_schedule_table[0].ff_coef;
+        *integral_limit = current_loop_schedule_table[0].integral_limit;
+        return;
+    }
+
+    if (iq_abs >= last_point->iq_abs) {
+        *ff_coef = last_point->ff_coef;
+        *integral_limit = last_point->integral_limit;
+        return;
+    }
+
+    for (idx = 0U; idx < (table_size - 1U); idx++) {
+        const CurrentLoopSchedulePoint_t *p0 = &current_loop_schedule_table[idx];
+        const CurrentLoopSchedulePoint_t *p1 = &current_loop_schedule_table[idx + 1U];
+
+        if (iq_abs <= p1->iq_abs) {
+            const float span = p1->iq_abs - p0->iq_abs;
+            const float ratio = (span > 0.0f) ? ((iq_abs - p0->iq_abs) / span) : 0.0f;
+
+            *ff_coef = current_loop_lerp(p0->ff_coef, p1->ff_coef, ratio);
+            *integral_limit = current_loop_lerp(p0->integral_limit, p1->integral_limit, ratio);
+            return;
+        }
+    }
+
+    *ff_coef = last_point->ff_coef;
+    *integral_limit = last_point->integral_limit;
+}
+
 void linkDriver(Driver_t *driver, Motor_t *motor)
 {
     if (!driver || !motor) return;

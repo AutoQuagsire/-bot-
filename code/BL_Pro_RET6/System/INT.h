@@ -42,7 +42,7 @@ extern pid_csv_data_t pid_csv_data;
 
 /* 高频采样缓存：10kHz ISR采样，主循环慢速导出 */
 #ifndef PID_FAST_LOG_ENABLE
-#define PID_FAST_LOG_ENABLE 0U
+#define PID_FAST_LOG_ENABLE 1U
 #endif
 
 #define PID_FAST_LOG_CAPACITY 2048U

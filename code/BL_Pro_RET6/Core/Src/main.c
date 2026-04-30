@@ -24,7 +24,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "sys.h"   /* 保留：INT.c 中有 extern AS5047P_Handle encoder_right */
-#include "pid_autotune.h"
+
 #include <math.h>
 
 
@@ -122,9 +122,8 @@ int main(void)
   if (!App_StartupCalibrate()) {
       Error_Handler();
   }
-  //App_CurrentSenseSignTest();   // 看串口建议
-  App_SensorDirectionTest();
-  //App_FOCControlIT_Enable();
+
+  App_FOCControlIT_Enable();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -133,7 +132,8 @@ int main(void)
   {
     
     /* USER CODE END WHILE */
-    //DebuginWhile();
+    DebuginWhile();
+    Process_USB_Command();
     /* USER CODE BEGIN 3 */
 
 

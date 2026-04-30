@@ -2,6 +2,7 @@
 #define PID_H
 
 #include <stdint.h>
+#include "BLDCMotor.h"
 
 typedef struct {
     float Kp, Ki, Kd;      // 参数
@@ -16,6 +17,8 @@ typedef struct {
 // PID控制函数
 void PID_Calculate(PID_t *pid, float target, float measure, uint8_t freeze_external);
 void PID_CalculateTest(PID_t *pid, float target, float measure);
+void PID_CalCurrent(PID_t *pid, float target, float measure, uint8_t freeze_external);
+void PID_Reset(PID_t *pid);
 void PID_ParameterInit(PID_t *pid,float kp,float ki,float kd,float integral_limit);
 void PID_ParameterInitEx(PID_t *pid,float kp,float ki,float kd,float integral_limit,
                  float output_limit,float i_err_min,float i_sep_ratio);

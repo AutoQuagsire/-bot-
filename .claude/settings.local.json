@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(reg query *)",
+      "Read(//c/Users/Lenovo/.codex/**)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\Lenovo\\Vodka\\dataengines\\firewater\\DATA"
+    ]
+  }
+}

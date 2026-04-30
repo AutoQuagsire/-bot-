@@ -36,6 +36,7 @@ static CurrentSense_t  g_current_sense1; // 电流采样对象
 static PID_t            g_speed_pid1;
 LowPassFilter_t         g_speed_lpf1;
 static PID_t            g_current_pid1;
+static PID_t            g_current_pid1_Common;
 LowPassFilter_t         g_current_lpf1;
 
 
@@ -47,47 +48,63 @@ static CurrentSense_t  g_current_sense2; // 电流采样对象
 static PID_t            g_speed_pid2;
 LowPassFilter_t         g_speed_lpf2;
 static PID_t            g_current_pid2;
+static PID_t            g_current_pid2_Common;
 LowPassFilter_t         g_current_lpf2;
 
 
 static uint32_t         g_last_loop_tick_ms = 0U;
 static uint32_t         g_last_print_tick_ms = 0U;
+static volatile CurrentLoopDebugSnapshot_t g_current_loop_debug1;
+static volatile CurrentLoopDebugSnapshot_t g_current_loop_debug2;
+static uint32_t g_last_current_debug_print_ms = 0U;
 
 
 
 PID_t Left_Velocity_FOC_PID;
-float Left_Target = 20.0f;
+float Left_Target = 0.3f;
+volatile uint8_t g_current_pid_mode = 0U; /* 0=CurrentLoop_FFPI_V1, 1=Pure PI compare */
 
+float g_speed_fault2 = 0.0f;
+float g_speed_fault1 = 0.0f;
 
-
-
-#define LEFT_MOTOR_ENABLE 0U
+#define LEFT_MOTOR_ENABLE 1U
 #define RIGHT_MOTOR_ENABLE 1U
 
 #define APP_LOOP_TEST_UQ_V        (1.0f)
 #define APP_LOOP_PRINT_PERIOD_MS  (100U)
 
-#define APP_SPEED_LOOP_ENABLE      (0U)
-#define APP_SPEED_TARGET_RAD_S     (20.0f)
-#define APP_SPEED_KP               (0.06f)
+#define APP_SPEED_LOOP_ENABLE      (1U)
+#define APP_SPEED_TARGET_RAD_S     (10.0f)
+#define APP_SPEED_KP               (0.055f)
 #define APP_SPEED_KI               (0.00035f)
 #define APP_SPEED_KD               (0.0f)
-#define APP_SPEED_UQ_LIMIT         (8.0f)
-#define APP_SPEED_I_LIMIT          (4.0f)
+#define APP_SPEED_UQ_LIMIT         (1.8f)
+#define APP_SPEED_I_LIMIT          (0.5f)
 #define APP_SPEED_I_ERR_MIN        (0.05f)
 #define APP_SPEED_I_SEP_RATIO      (0.75f)
 #define APP_SPEED_VEL_FAULT_ABS    (80.0f)
 
 
 #define APP_CURRENT_LOOP_ENABLE      (1U)
-#define APP_CURRENT_TARGET_A       (1.0f)
-#define APP_CURRENT_KP             (5.5)
-#define APP_CURRENT_KI             (0.8f)
+#define APP_CURRENT_TARGET_A       (0.3f)
+#define APP_CURRENT_KP             (2.5)
+#define APP_CURRENT_KI             (0.2f)
 #define APP_CURRENT_KD             (0.0f)
-#define APP_CURRENT_OUT_LIMIT       (8.0f)
-#define APP_CURRENT_I_LIMIT          (5.5f)
+
+#define APP_CURRENT_I_LIMIT          (5.0f)
+#define APP_CURRENT_PURE_PI_I_LIMIT  (6.0f)
 #define APP_CURRENT_I_ERR_MIN        (0.05f)
-#define APP_CURRENT_I_SEP_RATIO      (0.7f)
+
+
+#define APP_CURRENT_FF_KP             (0.8f)
+#define APP_CURRENT_FF_KI             (2.4f)
+#define APP_CURRENT_FF_KD             (0.0f)
+#define APP_CURRENT_FF_I_LIMIT          (5.0f)
+
+
+#define APP_CURRENT_I_ERR_MIN        (0.05f)
+#define APP_CURRENT_OUT_LIMIT       (10.963f)
+#define APP_CURRENT_DEBUG_PRINT_PERIOD_MS (100U)
 
 #define APP_CS_SIGN_TEST_UQ_V         (0.8f)
 #define APP_CS_SIGN_TEST_SETTLE_MS    (80U)
@@ -269,6 +286,230 @@ static __attribute__((unused)) float App_MatrixStep(uint32_t now_ms, float vel)
     return uq;
 }
 
+static void App_PIDResetRuntime(PID_t *pid)
+{
+    PID_Reset(pid);
+}
+
+static void App_CurrentLoopDebugClear(volatile CurrentLoopDebugSnapshot_t *debug)
+{
+    if (debug == NULL) {
+        return;
+    }
+
+    debug->target_iq = 0.0f;
+    debug->filtered_iq = 0.0f;
+    debug->raw_iq = 0.0f;
+    debug->error = 0.0f;
+    debug->pi_out = 0.0f;
+    debug->ff_term = 0.0f;
+    debug->uq_final = 0.0f;
+    debug->ff_coef = 0.0f;
+    debug->integral_limit = 0.0f;
+    debug->pid_integral = 0.0f;
+}
+
+static float App_CurrentLoopComputeUq(Motor_t *motor,
+                                      PID_t *pid,
+                                      float target_iq,
+                                      float filtered_iq,
+                                      float raw_iq,
+                                      uint8_t use_feedforward,
+                                      volatile CurrentLoopDebugSnapshot_t *debug)
+{
+    float voltage_limit;
+    float pi_out;
+    float ff_term = 0.0f;
+    float ff_coef = 0.0f;
+    float integral_limit = 0.0f;
+    float uq_final;
+
+    if ((motor == NULL) || (pid == NULL)) {
+        return 0.0f;
+    }
+
+    CurrentLoop_GetScheduledParams(target_iq, &ff_coef, &integral_limit);
+    pid->integral_limit = integral_limit;
+
+    if (use_feedforward) {
+        pid->I_SEP_RATIO = CURRENT_LOOP_I_SEP_RATIO;
+    } else {
+        pid->I_SEP_RATIO = CURRENT_LOOP_PURE_PI_I_SEP_RATIO;
+    }
+
+    PID_CalCurrent(pid, target_iq, filtered_iq, 0U);
+    pi_out = pid->output;
+
+#if CURRENT_LOOP_USE_FEEDFORWARD
+    if (use_feedforward) {
+        ff_term = target_iq * motor->param.phase_resistance * ff_coef;
+    }
+#else
+    (void)use_feedforward;
+#endif
+
+    uq_final = pi_out + ff_term;
+    voltage_limit = motor->config.voltage_limit;
+    if ((voltage_limit <= 0.0f) && (motor->driver != NULL)) {
+        voltage_limit = motor->driver->voltage_limit;
+    }
+    if (voltage_limit <= 0.0f) {
+        voltage_limit = pid->output_limit;
+    }
+    uq_final = constrain(uq_final, -voltage_limit, voltage_limit);
+
+    if (debug != NULL) {
+        debug->target_iq = target_iq;
+        debug->filtered_iq = filtered_iq;
+        debug->raw_iq = raw_iq;
+        debug->error = target_iq - filtered_iq;
+        debug->pi_out = pi_out;
+        debug->ff_term = ff_term;
+        debug->uq_final = uq_final;
+        debug->ff_coef = ff_coef;
+        debug->integral_limit = pid->integral_limit;
+        debug->pid_integral = pid->error_integral;
+    }
+
+    return uq_final;
+}
+
+static void App_PrintCurrentLoopDebugIfDue(void)
+{
+    CurrentLoopDebugSnapshot_t left_debug;
+    CurrentLoopDebugSnapshot_t right_debug;
+    uint32_t now_ms = HAL_GetTick();
+
+    if ((now_ms - g_last_current_debug_print_ms) < APP_CURRENT_DEBUG_PRINT_PERIOD_MS) {
+        return;
+    }
+    g_last_current_debug_print_ms = now_ms;
+
+    __disable_irq();
+    left_debug = g_current_loop_debug1;
+    right_debug = g_current_loop_debug2;
+    __enable_irq();
+
+#if LEFT_MOTOR_ENABLE
+    USB_Debug_Printf("[CL][L] %.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
+                     left_debug.target_iq,
+                     left_debug.filtered_iq,
+                     left_debug.raw_iq,
+                     left_debug.error,
+                     left_debug.pi_out,
+                     left_debug.ff_term,
+                     left_debug.uq_final,
+                     left_debug.ff_coef,
+                     left_debug.integral_limit,
+                     left_debug.pid_integral);
+#endif
+#if RIGHT_MOTOR_ENABLE
+    USB_Debug_Printf("[CL][R] %.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
+                     right_debug.target_iq,
+                     right_debug.filtered_iq,
+                     right_debug.raw_iq,
+                     right_debug.error,
+                     right_debug.pi_out,
+                     right_debug.ff_term,
+                     right_debug.uq_final,
+                     right_debug.ff_coef,
+                     right_debug.integral_limit,
+                     right_debug.pid_integral);
+#endif
+}
+
+static void App_CurrentPIDApplyOne(PID_t *pid, float kp, float ki, float kd, float integral_limit)
+{
+    float output_limit;
+    float i_err_min;
+    float i_sep_ratio;
+
+    if (pid == NULL) {
+        return;
+    }
+
+    output_limit = (pid->output_limit > 0.0f) ? pid->output_limit : APP_CURRENT_OUT_LIMIT;
+    i_err_min = (pid->I_ERR_MIN > 0.0f) ? pid->I_ERR_MIN : APP_CURRENT_I_ERR_MIN;
+    i_sep_ratio = (pid->I_SEP_RATIO > 0.0f) ? pid->I_SEP_RATIO : CURRENT_LOOP_I_SEP_RATIO;
+
+    PID_ParameterInitEx(pid, kp, ki, kd, integral_limit,
+                        output_limit, i_err_min, i_sep_ratio);
+    App_PIDResetRuntime(pid);
+}
+
+void App_CurrentPID_SetSame(float kp, float ki, float kd, float integral_limit)
+{
+    PID_t *pid1, *pid2;
+
+    if (integral_limit <= 0.0f) {
+        integral_limit = APP_CURRENT_I_LIMIT;
+    }
+
+    if (g_current_pid_mode == 0U) {
+        pid1 = &g_current_pid1;
+        pid2 = &g_current_pid2;
+    } else {
+        pid1 = &g_current_pid1_Common;
+        pid2 = &g_current_pid2_Common;
+    }
+
+    __disable_irq();
+    App_CurrentPIDApplyOne(pid1, kp, ki, kd, integral_limit);
+    App_CurrentPIDApplyOne(pid2, kp, ki, kd, integral_limit);
+    __enable_irq();
+}
+
+void App_CurrentPID_GetSame(float *kp, float *ki, float *kd, float *integral_limit)
+{
+    float local_kp;
+    float local_ki;
+    float local_kd;
+    float local_ilim;
+    PID_t *pid;
+
+    if (g_current_pid_mode == 0U) {
+        pid = &g_current_pid1;
+    } else {
+        pid = &g_current_pid1_Common;
+    }
+
+    __disable_irq();
+    local_kp = pid->Kp;
+    local_ki = pid->Ki;
+    local_kd = pid->Kd;
+    local_ilim = pid->integral_limit;
+    __enable_irq();
+
+    if (local_ilim <= 0.0f) {
+        local_ilim = APP_CURRENT_I_LIMIT;
+    }
+
+    if (kp != NULL) {
+        *kp = local_kp;
+    }
+    if (ki != NULL) {
+        *ki = local_ki;
+    }
+    if (kd != NULL) {
+        *kd = local_kd;
+    }
+    if (integral_limit != NULL) {
+        *integral_limit = local_ilim;
+    }
+}
+
+void App_ResetCurrentPIDs(void)
+{
+    __disable_irq();
+    App_PIDResetRuntime(&g_current_pid1);
+    App_PIDResetRuntime(&g_current_pid2);
+    App_PIDResetRuntime(&g_current_pid1_Common);
+    App_PIDResetRuntime(&g_current_pid2_Common);
+    App_CurrentLoopDebugClear(&g_current_loop_debug1);
+    App_CurrentLoopDebugClear(&g_current_loop_debug2);
+    __enable_irq();
+}
+
 /**
  * @brief  FOC 应用层对象初始化
  * @retval 1: 初始化成功
@@ -329,8 +570,10 @@ uint8_t App_FOCStack_Init(void)
     linkCurrentSense(&g_current_sense1, &g_motor1);
 
     MotorParam_Init(&g_motor1, 14.0f, 10.3f, 0.0f, 0.0f, 0.0f);
+    g_motor1.config.voltage_limit = g_driver1->voltage_limit;
+    g_motor1.config.voltage_sensor_align = g_driver1->voltage_limit;
     g_motor1.zero_electrical_angle = 0.0f;
-    g_motor1.state.sensor_direction = sensor_direction_ccw;
+    g_motor1.state.sensor_direction = sensor_direction_cw;
 
     #endif
 
@@ -386,8 +629,10 @@ uint8_t App_FOCStack_Init(void)
     linkCurrentSense(&g_current_sense2, &g_motor2);
 
     MotorParam_Init(&g_motor2, 14.0f, 10.3f, 0.0f, 0.0f, 0.0f);
+    g_motor2.config.voltage_limit = g_driver2->voltage_limit;
+    g_motor2.config.voltage_sensor_align = g_driver2->voltage_limit;
     g_motor2.zero_electrical_angle = 0.0f;
-    g_motor2.state.sensor_direction = sensor_direction_ccw;
+    g_motor2.state.sensor_direction = sensor_direction_cw;
     #endif
 
 
@@ -411,7 +656,7 @@ uint8_t App_FOCStack_Init(void)
 
 
     Left_Velocity_FOC_PID = g_speed_pid1;
-    Left_Target = APP_SPEED_TARGET_RAD_S;
+    Left_Target = 0.3f;
     g_speed_fault1 = 0U;
     g_speed_fault2 = 0U;
 
@@ -421,22 +666,40 @@ uint8_t App_FOCStack_Init(void)
 #endif
 #if APP_CURRENT_LOOP_ENABLE
     PID_ParameterInitEx(&g_current_pid1,
-                        APP_CURRENT_KP,
-                        APP_CURRENT_KI,
-                        APP_CURRENT_KD,
-                        APP_CURRENT_I_LIMIT,
+                        APP_CURRENT_FF_KP,
+                        APP_CURRENT_FF_KI,
+                        APP_CURRENT_FF_KD,
+                        APP_CURRENT_FF_I_LIMIT,
                         APP_CURRENT_OUT_LIMIT,
                         APP_CURRENT_I_ERR_MIN,
-                        APP_CURRENT_I_SEP_RATIO);
+                        CURRENT_LOOP_I_SEP_RATIO);
     PID_ParameterInitEx(&g_current_pid2,
-                        APP_CURRENT_KP,
-                        APP_CURRENT_KI,
-                        APP_CURRENT_KD,
-                        APP_CURRENT_I_LIMIT,
+                        APP_CURRENT_FF_KP,
+                        APP_CURRENT_FF_KI,
+                        APP_CURRENT_FF_KD,
+                        APP_CURRENT_FF_I_LIMIT,
                         APP_CURRENT_OUT_LIMIT,
                         APP_CURRENT_I_ERR_MIN,
-                        APP_CURRENT_I_SEP_RATIO);
-
+                        CURRENT_LOOP_I_SEP_RATIO);
+    PID_ParameterInitEx(&g_current_pid1_Common,
+                        5.3f,
+                        0.62f,
+                        0.0f,
+                        APP_CURRENT_PURE_PI_I_LIMIT,
+                        11.0f,
+                        0.05f,
+                        CURRENT_LOOP_PURE_PI_I_SEP_RATIO);
+    PID_ParameterInitEx(&g_current_pid2_Common,
+                        5.3f,
+                        0.62f,
+                        0.0f,
+                        APP_CURRENT_PURE_PI_I_LIMIT,
+                        11.0f,
+                        0.05f,
+                        CURRENT_LOOP_PURE_PI_I_SEP_RATIO);
+    LowPassFilter_Init(&g_current_lpf1, 800.0f, FOC_FREQUENCY);   
+    LowPassFilter_Init(&g_current_lpf2, 800.0f, FOC_FREQUENCY); 
+    App_ResetCurrentPIDs();
 #endif
 
     USB_Debug_Printf("FOC stack init ok\r\n");
@@ -463,7 +726,7 @@ uint8_t App_StartupCalibrate(void)
      * - 300                  : 对齐稳定等待时间，单位 ms
      */
     #if LEFT_MOTOR_ENABLE
-    if (!Motor_CalibrateZeroElectricalAngle(&g_motor1, -5.0f, PI / 2.0f, 300)) {
+    if (!Motor_CalibrateZeroElectricalAngle(&g_motor1, 5.0f, PI / 2.0f, 300)) {
         USB_Debug_Printf("Startup calibrate1 failed\r\n");
         return 0U;
     }
@@ -472,7 +735,7 @@ uint8_t App_StartupCalibrate(void)
     #endif
 
     #if RIGHT_MOTOR_ENABLE
-    if (!Motor_CalibrateZeroElectricalAngle(&g_motor2, -5.0f, PI / 2.0f, 300)) {
+    if (!Motor_CalibrateZeroElectricalAngle(&g_motor2, 5.0f, PI / 2.0f, 300)) {
         USB_Debug_Printf("Startup calibrate2 failed\r\n");
         return 0U;
     }
@@ -743,6 +1006,7 @@ void App_SensorDirectionTest(void)
 #if LEFT_MOTOR_ENABLE
     app_sensor_direction_test_one("L", &g_motor1, &g_sensor1);
 #endif
+    HAL_Delay(500);
 
 #if RIGHT_MOTOR_ENABLE
     app_sensor_direction_test_one("R", &g_motor2, &g_sensor2);
@@ -839,15 +1103,145 @@ float vel_windowed_f2 = 0;
 float uq_cmd2 = APP_LOOP_TEST_UQ_V;
 static uint16_t g_move_downsample_cnt = 0U;
 
+
+
+PhaseCurrent_t Left_Current = {0.0f, 0.0f};
+float Left_RawIq = 0.0f;
+float Left_FilteredIq = 0.0f;
+
+PhaseCurrent_t Right_Current = {0.0f, 0.0f};
+float Right_RawIq = 0.0f;
+float Right_FilteredIq = 0.0f;
+
+void App_ResetSpeedPIDs(void)
+{
+    __disable_irq();
+    App_PIDResetRuntime(&g_speed_pid1);
+    App_PIDResetRuntime(&g_speed_pid2);
+    __enable_irq();
+}
+
+/* ── FastLog: one-shot 2048-sample capture, armed on PID update ── */
+#define APP_FASTLOG_SIZE (2048U)
+
+typedef struct {
+    float meas_l;
+    float meas_r;
+} FastLogSample_t;
+
+static FastLogSample_t g_fastlog_buf[APP_FASTLOG_SIZE];
+static volatile uint16_t g_fastlog_count = 0U;
+static volatile uint8_t  g_fastlog_armed = 0U;
+static volatile uint8_t  g_fastlog_done  = 0U;
+static volatile uint32_t g_fastlog_capture_id = 0U;
+static volatile uint8_t  g_fastlog_blocked = 0U;
+
+static uint8_t app_fastlog_try_arm_internal(uint8_t force_rearm)
+{
+    uint8_t can_arm;
+
+    __disable_irq();
+    can_arm = (uint8_t)(force_rearm || ((!g_fastlog_armed) && (!g_fastlog_done)));
+    if (can_arm) {
+        g_fastlog_count = 0U;
+        g_fastlog_armed = 1U;
+        g_fastlog_done = 0U;
+        g_fastlog_capture_id++;
+        g_fastlog_blocked = 0U;
+    } else {
+        g_fastlog_blocked = 1U;
+    }
+    __enable_irq();
+
+    return can_arm;
+}
+
+void App_ArmFastLog(void)
+{
+    (void)app_fastlog_try_arm_internal(0U);
+}
+
+uint8_t App_TryArmFastLog(void)
+{
+    return app_fastlog_try_arm_internal(0U);
+}
+
+void App_StopFastLog(void)
+{
+    __disable_irq();
+    g_fastlog_armed = 0U;
+    __enable_irq();
+}
+
+void App_GetFastLogStatus(uint16_t *count,
+                          uint8_t *armed,
+                          uint8_t *done,
+                          uint32_t *capture_id,
+                          uint8_t *blocked)
+{
+    uint16_t local_count;
+    uint8_t local_armed;
+    uint8_t local_done;
+    uint32_t local_capture_id;
+    uint8_t local_blocked;
+
+    __disable_irq();
+    local_count = g_fastlog_count;
+    local_armed = g_fastlog_armed;
+    local_done = g_fastlog_done;
+    local_capture_id = g_fastlog_capture_id;
+    local_blocked = g_fastlog_blocked;
+    __enable_irq();
+
+    if (count != NULL) {
+        *count = local_count;
+    }
+    if (armed != NULL) {
+        *armed = local_armed;
+    }
+    if (done != NULL) {
+        *done = local_done;
+    }
+    if (capture_id != NULL) {
+        *capture_id = local_capture_id;
+    }
+    if (blocked != NULL) {
+        *blocked = local_blocked;
+    }
+}
+
+static void fastlog_push(float meas_l, float meas_r)
+{
+    uint16_t n;
+    if (!g_fastlog_armed) return;
+    n = g_fastlog_count;
+    if (n >= APP_FASTLOG_SIZE) {
+        g_fastlog_armed = 0U;
+        g_fastlog_done  = 1U;
+        return;
+    }
+    g_fastlog_buf[n].meas_l = meas_l;
+    g_fastlog_buf[n].meas_r = meas_r;
+    g_fastlog_count = (uint16_t)(n + 1U);
+    if ((uint16_t)(n + 1U) >= APP_FASTLOG_SIZE) {
+        g_fastlog_armed = 0U;
+        g_fastlog_done  = 1U;
+    }
+}
+
 static uint8_t loopFOC(void)
 {
+    #if LEFT_MOTOR_ENABLE
     if (!Motor_UpdateSensor(&g_motor1, FOC_PERIOD_S)) {
         return 0U;
     }
+    #endif
 
+    #if RIGHT_MOTOR_ENABLE
     if (!Motor_UpdateSensor(&g_motor2, FOC_PERIOD_S)) {
         return 0U;
     }
+    #endif
 
     {
         float sin_e1 = 0.0f;
@@ -855,12 +1249,78 @@ static uint8_t loopFOC(void)
         float sin_e2 = 0.0f;
         float cos_e2 = 0.0f;
 
+    #if LEFT_MOTOR_ENABLE
         Get_SinCos(g_motor1.electrical_angle, &sin_e1, &cos_e1);
-        Get_SinCos(g_motor2.electrical_angle, &sin_e2, &cos_e2);
+    #endif
 
-        Motor_SetPhaseVoltageQBySinCos(&g_motor1, uq_cmd1, sin_e1, cos_e1);
-        Motor_SetPhaseVoltageQBySinCos(&g_motor2, uq_cmd2, sin_e2, cos_e2);
-    }
+    #if RIGHT_MOTOR_ENABLE
+        Get_SinCos(g_motor2.electrical_angle, &sin_e2, &cos_e2);
+    #endif
+
+    float Uq_cmd1 = 0.0f;
+    float Uq_cmd2 = 0.0f;
+
+    #if APP_CURRENT_LOOP_ENABLE && APP_CURRENT_LOOP_ENABLE
+        /* CurrentLoop_FFPI_V1:
+         * Uq = PI(Iq_ref - Iq_meas) + Iq_ref * R_phase * ff_coef
+         * Feedforward provides the base voltage estimate and PI only
+         * corrects dynamic error plus residual steady-state error.
+         */
+        Left_Current = CurrentSense_GetPhaseCurrent(&g_current_sense1);
+        Left_RawIq = CurrentSense_CalcIq(&g_current_sense1, sin_e1, cos_e1);
+        Left_FilteredIq = LowPassFilter_Update(&g_current_lpf1, Left_RawIq);
+        if (g_current_pid_mode == 0U) {
+            Uq_cmd1 = App_CurrentLoopComputeUq(&g_motor1,
+                                               &g_current_pid1,
+                                               Left_Target,
+                                               Left_FilteredIq,
+                                               Left_RawIq,
+                                               1U,
+                                               &g_current_loop_debug1);
+        } else {
+            Uq_cmd1 = App_CurrentLoopComputeUq(&g_motor1,
+                                               &g_current_pid1_Common,
+                                               Left_Target,
+                                               Left_FilteredIq,
+                                               Left_RawIq,
+                                               0U,
+                                               &g_current_loop_debug1);
+        }
+    #endif
+
+    #if RIGHT_MOTOR_ENABLE && APP_CURRENT_LOOP_ENABLE
+        Right_Current = CurrentSense_GetPhaseCurrent(&g_current_sense2);
+        Right_RawIq = CurrentSense_CalcIq(&g_current_sense2, sin_e2, cos_e2);
+        Right_FilteredIq = LowPassFilter_Update(&g_current_lpf2, Right_RawIq);
+
+        if (g_current_pid_mode == 0U) {
+            Uq_cmd2 = App_CurrentLoopComputeUq(&g_motor2,
+                                               &g_current_pid2,
+                                               Left_Target,
+                                               Right_FilteredIq,
+                                               Right_RawIq,
+                                               1U,
+                                               &g_current_loop_debug2);
+        } else {
+            Uq_cmd2 = App_CurrentLoopComputeUq(&g_motor2,
+                                               &g_current_pid2_Common,
+                                               Left_Target,
+                                               Right_FilteredIq,
+                                               Right_RawIq,
+                                               0U,
+                                               &g_current_loop_debug2);
+        }
+    #endif
+
+
+    Motor_SetPhaseVoltageQBySinCos(&g_motor1, Uq_cmd1, sin_e1, cos_e1);
+    Motor_SetPhaseVoltageQBySinCos(&g_motor2, Uq_cmd2, sin_e2, cos_e2);
+
+    fastlog_push(Left_FilteredIq, Right_FilteredIq);
+
+
+
+   }
 
     return 1U;
 }
@@ -921,14 +1381,32 @@ void App_LoopForIT(void)
 
 void DebuginWhile(void)
 {
-    static uint32_t last_print_ms = 0U;
-    uint32_t now_ms = HAL_GetTick();
+    uint16_t i;
+    uint16_t sample_count;
+    uint32_t capture_id;
 
-    if ((now_ms - last_print_ms) < 50U) {
+    //App_PrintCurrentLoopDebugIfDue();
+
+    if (!g_fastlog_done) {
         return;
     }
 
-    last_print_ms = now_ms;
-    USB_Debug_Printf("vel,windowed,filtered: %.2f, %.2f, %.2f, %.2f\r\n", uq_cmd1, vel_windowed_f1,uq_cmd2,vel_windowed_f2);
+    __disable_irq();
+    sample_count = g_fastlog_count;
+    capture_id = g_fastlog_capture_id;
+    __enable_irq();
 
+    USB_Debug_Printf("[FASTLOG] capture=%lu samples=%u format=capture_id,sample_idx,iq_l,iq_r\r\n",
+                     (unsigned long)capture_id,
+                     (unsigned)sample_count);
+    for (i = 0U; i < sample_count; i++) {
+        USB_Debug_Printf("Iq:%.3f\r\n",
+
+                         g_fastlog_buf[i].meas_l
+);
+    }
+
+    __disable_irq();
+    g_fastlog_done = 0U;
+    __enable_irq();
 }
