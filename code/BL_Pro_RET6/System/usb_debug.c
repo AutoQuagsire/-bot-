@@ -135,8 +135,6 @@ static void apply_pid_and_ack(float kp, float ki, float kd, float ilim)
 static void apply_target_and_ack(float target)
 {
     TUNE_TARGET = target;
-    App_ResetSpeedPIDs();
-    App_ResetCurrentPIDs();
 #if PID_FAST_LOG_ENABLE
     if (App_TryArmFastLog()) {
         USB_Debug_Printf("# FASTLOG auto-armed after target update, cap=%u\r\n",
@@ -148,7 +146,9 @@ static void apply_target_and_ack(float target)
     USB_Debug_Printf("# FASTLOG disabled (PID_FAST_LOG_ENABLE=0)\r\n");
 #endif
 
-    USB_Debug_Printf("# Target(%s) updated%.4f\r\n", TUNE_TARGET_NAME, TUNE_TARGET);
+    USB_Debug_Printf("# Target(%s) updated %.4f (PID state kept; use PID RESET to clear)\r\n",
+                     TUNE_TARGET_NAME,
+                     TUNE_TARGET);
 }
 
 static uint8_t parse_pid_values(const char *payload, float *kp, float *ki, float *kd, float *ilim)

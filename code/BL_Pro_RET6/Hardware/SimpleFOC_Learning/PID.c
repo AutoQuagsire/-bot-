@@ -84,6 +84,35 @@ void PID_Calculate(PID_t *pid, float target, float measure, uint8_t freeze_exter
     pid->last_error = error;
 }
 
+static float PID_LimitCurrentIntegralUnload(PID_t *pid, float delta_integral, float i_term_pre)
+{
+    float i_delta;
+
+    if ((pid == NULL) ||
+        (CURRENT_LOOP_I_UNLOAD_STEP_MAX <= 0.0f) ||
+        (fabsf(pid->Ki) <= 1e-6f) ||
+        (delta_integral == 0.0f) ||
+        (i_term_pre == 0.0f)) {
+        return delta_integral;
+    }
+
+    i_delta = pid->Ki * delta_integral;
+    if ((i_term_pre * i_delta) >= 0.0f) {
+        return delta_integral;
+    }
+
+    /* CurrentLoop_FFPI_V1: limit only I-term unloading.  During a target step
+     * the large transient error can otherwise dump the residual steady-state
+     * integral too quickly and leave Uq low when Iq reaches the new target. */
+    if (i_delta > CURRENT_LOOP_I_UNLOAD_STEP_MAX) {
+        i_delta = CURRENT_LOOP_I_UNLOAD_STEP_MAX;
+    } else if (i_delta < -CURRENT_LOOP_I_UNLOAD_STEP_MAX) {
+        i_delta = -CURRENT_LOOP_I_UNLOAD_STEP_MAX;
+    }
+
+    return i_delta / pid->Ki;
+}
+
 __attribute__((optimize("O2,fast-math")))
 void PID_CalCurrent(PID_t *pid, float target, float measure, uint8_t freeze_external)
 {
@@ -93,11 +122,14 @@ void PID_CalCurrent(PID_t *pid, float target, float measure, uint8_t freeze_exte
     float p_term;
     float i_term_pre;
     float u_raw_pre;
+    uint8_t freeze_requested;
+    uint8_t limit_unload;
     uint8_t freeze_by_sat;
     uint8_t freeze_integral;
     uint8_t allow_integrate;
     uint8_t allow_unwind;
     float i_term;
+    float i_delta = 0.0f;
 
     if (pid == NULL) {
         return;
@@ -112,19 +144,28 @@ void PID_CalCurrent(PID_t *pid, float target, float measure, uint8_t freeze_exte
     p_term = pid->Kp * error;
     i_term_pre = pid->Ki * pid->error_integral;
     u_raw_pre = p_term + i_term_pre;
+    freeze_requested = (uint8_t)((freeze_external & PID_CURRENT_FREEZE_INTEGRAL) != 0U);
+    limit_unload = (uint8_t)((freeze_external & PID_CURRENT_LIMIT_I_UNLOAD) != 0U);
 
     freeze_by_sat =
         ((u_raw_pre > pid->output_limit) && (error > 0.0f)) ||
         ((u_raw_pre < -pid->output_limit) && (error < 0.0f));
 
-    freeze_integral = (freeze_external || freeze_by_sat);
+    freeze_integral = (uint8_t)(freeze_requested || freeze_by_sat);
     allow_integrate = (fabsf(error) <= i_band);
     allow_unwind = (pid->error_integral * error < 0.0f);
 
     if (!freeze_integral && allow_integrate) {
-        pid->error_integral += error;
+        i_delta = error;
     } else if (allow_unwind) {
-        pid->error_integral += UNWIND_GAIN * error;
+        i_delta = UNWIND_GAIN * error;
+    }
+
+    if ((i_delta != 0.0f) && limit_unload) {
+        i_delta = PID_LimitCurrentIntegralUnload(pid, i_delta, i_term_pre);
+    }
+    if (i_delta != 0.0f) {
+        pid->error_integral += i_delta;
     }
 
     i_term = pid->Ki * pid->error_integral;

@@ -111,6 +111,9 @@ void MX_TIM1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM1_Init 2 */
+   __HAL_TIM_ENABLE_OCxPRELOAD(&htim1, TIM_CHANNEL_1);
+   __HAL_TIM_ENABLE_OCxPRELOAD(&htim1, TIM_CHANNEL_3);
+   __HAL_TIM_ENABLE_OCxPRELOAD(&htim1, TIM_CHANNEL_4);
 
   /* USER CODE END TIM1_Init 2 */
   HAL_TIM_MspPostInit(&htim1);
@@ -158,7 +161,7 @@ void MX_TIM2_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 1750;
+  sConfigOC.Pulse = 1050;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
@@ -212,7 +215,7 @@ void MX_TIM3_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 1750;
+  sConfigOC.Pulse = 1050;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
@@ -281,6 +284,9 @@ void MX_TIM4_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM4_Init 2 */
+   __HAL_TIM_ENABLE_OCxPRELOAD(&htim4, TIM_CHANNEL_2);
+   __HAL_TIM_ENABLE_OCxPRELOAD(&htim4, TIM_CHANNEL_3);
+   __HAL_TIM_ENABLE_OCxPRELOAD(&htim4, TIM_CHANNEL_4);
 
   /* USER CODE END TIM4_Init 2 */
   HAL_TIM_MspPostInit(&htim4);

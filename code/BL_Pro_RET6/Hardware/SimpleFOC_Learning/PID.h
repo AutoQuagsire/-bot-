@@ -14,6 +14,9 @@ typedef struct {
     float I_SEP_RATIO;  //积分带比例
     float I_ERR_MIN;//控制量量纲大小，避免积分带过窄
 } PID_t;
+
+#define PID_CURRENT_FREEZE_INTEGRAL   (0x01U)
+#define PID_CURRENT_LIMIT_I_UNLOAD    (0x02U)
 // PID控制函数
 void PID_Calculate(PID_t *pid, float target, float measure, uint8_t freeze_external);
 void PID_CalculateTest(PID_t *pid, float target, float measure);

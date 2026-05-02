@@ -12,11 +12,31 @@
 #endif
 
 #ifndef CURRENT_LOOP_I_SEP_RATIO
-#define CURRENT_LOOP_I_SEP_RATIO 0.15f
+#define CURRENT_LOOP_I_SEP_RATIO 0.2f
 #endif
 
 #ifndef CURRENT_LOOP_PURE_PI_I_SEP_RATIO
 #define CURRENT_LOOP_PURE_PI_I_SEP_RATIO 0.75f
+#endif
+
+#ifndef CURRENT_LOOP_I_UNLOAD_STEP_MAX
+#define CURRENT_LOOP_I_UNLOAD_STEP_MAX 0.025f
+#endif
+
+#ifndef CURRENT_LOOP_I_UNLOAD_LIMIT_TICKS
+#define CURRENT_LOOP_I_UNLOAD_LIMIT_TICKS 8U
+#endif
+
+#ifndef CURRENT_LOOP_TARGET_STEP_EPS
+#define CURRENT_LOOP_TARGET_STEP_EPS 0.001f
+#endif
+
+#ifndef CURRENT_LOOP_IQ_REF_STEP_UP_MAX
+#define CURRENT_LOOP_IQ_REF_STEP_UP_MAX 0.025f
+#endif
+
+#ifndef CURRENT_LOOP_IQ_REF_STEP_DOWN_MAX
+#define CURRENT_LOOP_IQ_REF_STEP_DOWN_MAX 0.025f
 #endif
 
 /*
@@ -39,6 +59,7 @@ typedef struct {
 
 typedef struct {
     float target_iq;
+    float iq_ref;
     float filtered_iq;
     float raw_iq;
     float error;

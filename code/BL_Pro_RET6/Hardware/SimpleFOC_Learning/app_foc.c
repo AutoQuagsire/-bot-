@@ -56,6 +56,10 @@ static uint32_t         g_last_loop_tick_ms = 0U;
 static uint32_t         g_last_print_tick_ms = 0U;
 static volatile CurrentLoopDebugSnapshot_t g_current_loop_debug1;
 static volatile CurrentLoopDebugSnapshot_t g_current_loop_debug2;
+static uint8_t g_current_i_unload_limit_ticks1 = 0U;
+static uint8_t g_current_i_unload_limit_ticks2 = 0U;
+static float g_current_iq_ref1 = 0.0f;
+static float g_current_iq_ref2 = 0.0f;
 static uint32_t g_last_current_debug_print_ms = 0U;
 
 
@@ -298,6 +302,7 @@ static void App_CurrentLoopDebugClear(volatile CurrentLoopDebugSnapshot_t *debug
     }
 
     debug->target_iq = 0.0f;
+    debug->iq_ref = 0.0f;
     debug->filtered_iq = 0.0f;
     debug->raw_iq = 0.0f;
     debug->error = 0.0f;
@@ -309,13 +314,40 @@ static void App_CurrentLoopDebugClear(volatile CurrentLoopDebugSnapshot_t *debug
     debug->pid_integral = 0.0f;
 }
 
+static float App_CurrentLoopSlewIqRef(float iq_ref, float target_iq_cmd)
+{
+    float delta = target_iq_cmd - iq_ref;
+
+    if (delta > CURRENT_LOOP_IQ_REF_STEP_UP_MAX) {
+        delta = CURRENT_LOOP_IQ_REF_STEP_UP_MAX;
+    } else if (delta < -CURRENT_LOOP_IQ_REF_STEP_DOWN_MAX) {
+        delta = -CURRENT_LOOP_IQ_REF_STEP_DOWN_MAX;
+    }
+
+    return iq_ref + delta;
+}
+
+static uint8_t App_CurrentLoopIsTargetMagnitudeFalling(float target_iq, float prev_target_iq)
+{
+    const float eps = CURRENT_LOOP_TARGET_STEP_EPS;
+    float target_abs = fabsf(target_iq);
+    float prev_abs = fabsf(prev_target_iq);
+    uint8_t same_positive = (uint8_t)((target_iq > eps) && (prev_target_iq > eps));
+    uint8_t same_negative = (uint8_t)((target_iq < -eps) && (prev_target_iq < -eps));
+
+    return (uint8_t)((same_positive || same_negative) &&
+                     ((target_abs + eps) < prev_abs));
+}
+
 static float App_CurrentLoopComputeUq(Motor_t *motor,
                                       PID_t *pid,
-                                      float target_iq,
+                                      float target_iq_cmd,
                                       float filtered_iq,
                                       float raw_iq,
                                       uint8_t use_feedforward,
-                                      volatile CurrentLoopDebugSnapshot_t *debug)
+                                      volatile CurrentLoopDebugSnapshot_t *debug,
+                                      uint8_t *i_unload_limit_ticks,
+                                      float *iq_ref_state)
 {
     float voltage_limit;
     float pi_out;
@@ -323,12 +355,22 @@ static float App_CurrentLoopComputeUq(Motor_t *motor,
     float ff_coef = 0.0f;
     float integral_limit = 0.0f;
     float uq_final;
+    float iq_ref = target_iq_cmd;
+    uint8_t pid_flags = 0U;
 
     if ((motor == NULL) || (pid == NULL)) {
         return 0.0f;
     }
 
-    CurrentLoop_GetScheduledParams(target_iq, &ff_coef, &integral_limit);
+    if ((use_feedforward != 0U) && (iq_ref_state != NULL)) {
+        iq_ref = App_CurrentLoopSlewIqRef(*iq_ref_state, target_iq_cmd);
+        *iq_ref_state = iq_ref;
+    } else if (iq_ref_state != NULL) {
+        iq_ref = target_iq_cmd;
+        *iq_ref_state = iq_ref;
+    }
+
+    CurrentLoop_GetScheduledParams(iq_ref, &ff_coef, &integral_limit);
     pid->integral_limit = integral_limit;
 
     if (use_feedforward) {
@@ -337,12 +379,25 @@ static float App_CurrentLoopComputeUq(Motor_t *motor,
         pid->I_SEP_RATIO = CURRENT_LOOP_PURE_PI_I_SEP_RATIO;
     }
 
-    PID_CalCurrent(pid, target_iq, filtered_iq, 0U);
+    if ((use_feedforward != 0U) && (i_unload_limit_ticks != NULL)) {
+        float prev_iq_ref = (debug != NULL) ? debug->iq_ref : iq_ref;
+        if (App_CurrentLoopIsTargetMagnitudeFalling(iq_ref, prev_iq_ref)) {
+            *i_unload_limit_ticks = CURRENT_LOOP_I_UNLOAD_LIMIT_TICKS;
+        }
+        if (*i_unload_limit_ticks > 0U) {
+            pid_flags |= PID_CURRENT_LIMIT_I_UNLOAD;
+            (*i_unload_limit_ticks)--;
+        }
+    } else if (i_unload_limit_ticks != NULL) {
+        *i_unload_limit_ticks = 0U;
+    }
+
+    PID_CalCurrent(pid, iq_ref, filtered_iq, pid_flags);
     pi_out = pid->output;
 
 #if CURRENT_LOOP_USE_FEEDFORWARD
     if (use_feedforward) {
-        ff_term = target_iq * motor->param.phase_resistance * ff_coef;
+        ff_term = iq_ref * motor->param.phase_resistance * ff_coef;
     }
 #else
     (void)use_feedforward;
@@ -359,16 +414,17 @@ static float App_CurrentLoopComputeUq(Motor_t *motor,
     uq_final = constrain(uq_final, -voltage_limit, voltage_limit);
 
     if (debug != NULL) {
-        debug->target_iq = target_iq;
+        debug->target_iq = target_iq_cmd;
+        debug->iq_ref = iq_ref;
         debug->filtered_iq = filtered_iq;
         debug->raw_iq = raw_iq;
-        debug->error = target_iq - filtered_iq;
+        debug->error = iq_ref - filtered_iq;
         debug->pi_out = pi_out;
         debug->ff_term = ff_term;
         debug->uq_final = uq_final;
         debug->ff_coef = ff_coef;
         debug->integral_limit = pid->integral_limit;
-        debug->pid_integral = pid->error_integral;
+        debug->pid_integral = pid->Ki * pid->error_integral;
     }
 
     return uq_final;
@@ -391,8 +447,9 @@ static void App_PrintCurrentLoopDebugIfDue(void)
     __enable_irq();
 
 #if LEFT_MOTOR_ENABLE
-    USB_Debug_Printf("[CL][L] %.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
+    USB_Debug_Printf("[CL][L] %.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
                      left_debug.target_iq,
+                     left_debug.iq_ref,
                      left_debug.filtered_iq,
                      left_debug.raw_iq,
                      left_debug.error,
@@ -404,8 +461,9 @@ static void App_PrintCurrentLoopDebugIfDue(void)
                      left_debug.pid_integral);
 #endif
 #if RIGHT_MOTOR_ENABLE
-    USB_Debug_Printf("[CL][R] %.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
+    USB_Debug_Printf("[CL][R] %.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
                      right_debug.target_iq,
+                     right_debug.iq_ref,
                      right_debug.filtered_iq,
                      right_debug.raw_iq,
                      right_debug.error,
@@ -507,6 +565,10 @@ void App_ResetCurrentPIDs(void)
     App_PIDResetRuntime(&g_current_pid2_Common);
     App_CurrentLoopDebugClear(&g_current_loop_debug1);
     App_CurrentLoopDebugClear(&g_current_loop_debug2);
+    g_current_i_unload_limit_ticks1 = 0U;
+    g_current_i_unload_limit_ticks2 = 0U;
+    g_current_iq_ref1 = Left_Target;
+    g_current_iq_ref2 = Left_Target;
     __enable_irq();
 }
 
@@ -1122,11 +1184,22 @@ void App_ResetSpeedPIDs(void)
 }
 
 /* ── FastLog: one-shot 2048-sample capture, armed on PID update ── */
-#define APP_FASTLOG_SIZE (2048U)
+#define APP_FASTLOG_SIZE (512U)
 
 typedef struct {
-    float meas_l;
-    float meas_r;
+    float target_iq;
+    float iq_ref;
+    float filtered_iq;
+    float raw_iq;
+    float pi_out;
+    float ff_term;
+    float uq_final;
+    float ff_coef;
+    float integral_limit;
+    float pid_integral;
+    float shaft_angle;
+    float shaft_velocity;
+    float electrical_angle;
 } FastLogSample_t;
 
 static FastLogSample_t g_fastlog_buf[APP_FASTLOG_SIZE];
@@ -1210,18 +1283,35 @@ void App_GetFastLogStatus(uint16_t *count,
     }
 }
 
-static void fastlog_push(float meas_l, float meas_r)
+static void fastlog_push(const Motor_t *motor, volatile const CurrentLoopDebugSnapshot_t *debug)
 {
     uint16_t n;
-    if (!g_fastlog_armed) return;
+    if ((!g_fastlog_armed) || (debug == NULL)) return;
     n = g_fastlog_count;
     if (n >= APP_FASTLOG_SIZE) {
         g_fastlog_armed = 0U;
         g_fastlog_done  = 1U;
         return;
     }
-    g_fastlog_buf[n].meas_l = meas_l;
-    g_fastlog_buf[n].meas_r = meas_r;
+    g_fastlog_buf[n].target_iq = debug->target_iq;
+    g_fastlog_buf[n].iq_ref = debug->iq_ref;
+    g_fastlog_buf[n].filtered_iq = debug->filtered_iq;
+    g_fastlog_buf[n].raw_iq = debug->raw_iq;
+    g_fastlog_buf[n].pi_out = debug->pi_out;
+    g_fastlog_buf[n].ff_term = debug->ff_term;
+    g_fastlog_buf[n].uq_final = debug->uq_final;
+    g_fastlog_buf[n].ff_coef = debug->ff_coef;
+    g_fastlog_buf[n].integral_limit = debug->integral_limit;
+    g_fastlog_buf[n].pid_integral = debug->pid_integral;
+    if ((motor != NULL) && (motor->sensor != NULL)) {
+        g_fastlog_buf[n].shaft_angle = motor->sensor->data.shaft_angle;
+        g_fastlog_buf[n].shaft_velocity = motor->sensor->data.shaft_velocity;
+        g_fastlog_buf[n].electrical_angle = motor->electrical_angle;
+    } else {
+        g_fastlog_buf[n].shaft_angle = 0.0f;
+        g_fastlog_buf[n].shaft_velocity = 0.0f;
+        g_fastlog_buf[n].electrical_angle = 0.0f;
+    }
     g_fastlog_count = (uint16_t)(n + 1U);
     if ((uint16_t)(n + 1U) >= APP_FASTLOG_SIZE) {
         g_fastlog_armed = 0U;
@@ -1276,7 +1366,9 @@ static uint8_t loopFOC(void)
                                                Left_FilteredIq,
                                                Left_RawIq,
                                                1U,
-                                               &g_current_loop_debug1);
+                                               &g_current_loop_debug1,
+                                               &g_current_i_unload_limit_ticks1,
+                                               &g_current_iq_ref1);
         } else {
             Uq_cmd1 = App_CurrentLoopComputeUq(&g_motor1,
                                                &g_current_pid1_Common,
@@ -1284,7 +1376,9 @@ static uint8_t loopFOC(void)
                                                Left_FilteredIq,
                                                Left_RawIq,
                                                0U,
-                                               &g_current_loop_debug1);
+                                               &g_current_loop_debug1,
+                                               &g_current_i_unload_limit_ticks1,
+                                               &g_current_iq_ref1);
         }
     #endif
 
@@ -1300,7 +1394,9 @@ static uint8_t loopFOC(void)
                                                Right_FilteredIq,
                                                Right_RawIq,
                                                1U,
-                                               &g_current_loop_debug2);
+                                               &g_current_loop_debug2,
+                                               &g_current_i_unload_limit_ticks2,
+                                               &g_current_iq_ref2);
         } else {
             Uq_cmd2 = App_CurrentLoopComputeUq(&g_motor2,
                                                &g_current_pid2_Common,
@@ -1308,7 +1404,9 @@ static uint8_t loopFOC(void)
                                                Right_FilteredIq,
                                                Right_RawIq,
                                                0U,
-                                               &g_current_loop_debug2);
+                                               &g_current_loop_debug2,
+                                               &g_current_i_unload_limit_ticks2,
+                                               &g_current_iq_ref2);
         }
     #endif
 
@@ -1316,7 +1414,7 @@ static uint8_t loopFOC(void)
     Motor_SetPhaseVoltageQBySinCos(&g_motor1, Uq_cmd1, sin_e1, cos_e1);
     Motor_SetPhaseVoltageQBySinCos(&g_motor2, Uq_cmd2, sin_e2, cos_e2);
 
-    fastlog_push(Left_FilteredIq, Right_FilteredIq);
+    fastlog_push(&g_motor2, &g_current_loop_debug2);
 
 
 
@@ -1396,14 +1494,24 @@ void DebuginWhile(void)
     capture_id = g_fastlog_capture_id;
     __enable_irq();
 
-    USB_Debug_Printf("[FASTLOG] capture=%lu samples=%u format=capture_id,sample_idx,iq_l,iq_r\r\n",
+    USB_Debug_Printf("[FASTLOG] capture=%lu samples=%u format=target_iq,iq_ref,filtered_iq,raw_iq,pi_out,ff_term,uq_final,ff_coef,integral_limit,pid_integral,shaft_angle,shaft_velocity,electrical_angle\r\n",
                      (unsigned long)capture_id,
                      (unsigned)sample_count);
     for (i = 0U; i < sample_count; i++) {
-        USB_Debug_Printf("Iq:%.3f\r\n",
-
-                         g_fastlog_buf[i].meas_l
-);
+        USB_Debug_Printf("%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
+                         g_fastlog_buf[i].target_iq,
+                         g_fastlog_buf[i].iq_ref,
+                         g_fastlog_buf[i].filtered_iq,
+                         g_fastlog_buf[i].raw_iq,
+                         g_fastlog_buf[i].pi_out,
+                         g_fastlog_buf[i].ff_term,
+                         g_fastlog_buf[i].uq_final,
+                         g_fastlog_buf[i].ff_coef,
+                         g_fastlog_buf[i].integral_limit,
+                         g_fastlog_buf[i].pid_integral,
+                         g_fastlog_buf[i].shaft_angle,
+                         g_fastlog_buf[i].shaft_velocity,
+                         g_fastlog_buf[i].electrical_angle);
     }
 
     __disable_irq();

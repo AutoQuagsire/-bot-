@@ -45,7 +45,7 @@ extern pid_csv_data_t pid_csv_data;
 #define PID_FAST_LOG_ENABLE 1U
 #endif
 
-#define PID_FAST_LOG_CAPACITY 2048U
+#define PID_FAST_LOG_CAPACITY 512U
 
 typedef struct {
 	float setpoint;      /* 电流目标(A) */
