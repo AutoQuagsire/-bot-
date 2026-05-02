@@ -1,4 +1,3 @@
-#include "as5047p.h"
 #include "main.h"
 #include "stm32g4xx_hal_gpio.h"
 #include "sys.h"

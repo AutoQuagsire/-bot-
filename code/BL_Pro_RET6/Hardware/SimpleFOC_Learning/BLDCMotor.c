@@ -25,10 +25,40 @@
   #define ATTR_ALWAYS_INLINE inline
 #endif
 
+ATTR_OPT_FAST
+void Get_SinCos(float angle_el, float *sint, float *cost)
+{
+    if ((sint == NULL) || (cost == NULL)) {
+        return;
+    }
+#if defined(__GNUC__)
+    __builtin_sincosf(angle_el, sint, cost);
+#else
+    *sint = sinf(angle_el);
+    *cost = cosf(angle_el);
+#endif
+}
 
 
 
-//预留代码：实现功能：把一个驱动器对象的指针，挂到电机对象�?
+
+
+/* ============================================================
+ * 电流环自适应参数调度表
+ *
+ * 作用：
+ * 根据 |target_iq| 的大小，插值得到：
+ * 1. ff_coef        ：前馈系数，用于计算电压前馈项
+ * 2. integral_limit ：电流环积分限幅，用于限制积分输出
+ *
+ * 设计背景：
+ * 小电流段需要更小的积分限幅，避免积分造成小电流超调；
+ * 大电流段需要更大的积分限幅，保证有足够稳态补偿能力。
+ *
+ * 注意：
+ * 这里的 iq_abs 必须按绝对值查表，因为正负电流只代表方向，
+ * 参数调度主要取决于电流幅值。
+ * ============================================================ */
 static const CurrentLoopSchedulePoint_t current_loop_schedule_table[] = {
     {0.03f, 0.400f, 0.080f},
     {0.10f, 0.450f, 0.125f},
@@ -40,11 +70,42 @@ static const CurrentLoopSchedulePoint_t current_loop_schedule_table[] = {
     {1.80f, 0.550f, 0.650f},
 };
 
+
+/* 一维线性插值函数
+ *
+ * a：区间左端点参数值
+ * b：区间右端点参数值
+ * t：插值比例，范围理论上为 0~1
+ *
+ * 返回：
+ * a 和 b 之间按 t 比例插值得到的值
+ */
 static ATTR_ALWAYS_INLINE float current_loop_lerp(float a, float b, float t)
 {
     return a + (b - a) * t;
 }
 
+
+/* ============================================================
+ * 根据目标电流幅值获取电流环调度参数
+ *
+ * 输入：
+ * target_iq       ：目标 q 轴电流，可以为正或负
+ *
+ * 输出：
+ * ff_coef         ：前馈系数
+ * integral_limit  ：积分限幅
+ *
+ * 逻辑：
+ * 1. 对 target_iq 取绝对值；
+ * 2. 若小于表格最小点，则使用最小点参数；
+ * 3. 若大于表格最大点，则使用最大点参数；
+ * 4. 若位于表格中间，则寻找相邻两个点并线性插值。
+ *
+ * 这样做的好处：
+ * 不需要为每一个电流值单独测参数，
+ * 只需要测几个关键电流点，然后通过插值平滑过渡。
+ * ============================================================ */
 void CurrentLoop_GetScheduledParams(float target_iq,
                                     float *ff_coef,
                                     float *integral_limit)
@@ -54,31 +115,40 @@ void CurrentLoop_GetScheduledParams(float target_iq,
     float iq_abs;
     size_t idx;
 
+    /* 参数合法性检查：
+     * 如果输出指针为空，或者表格为空，直接返回。
+     */
     if ((ff_coef == NULL) || (integral_limit == NULL) || (table_size == 0U)) {
         return;
     }
 
+    /* 调度表按电流幅值工作，正负方向不影响参数选择 */
     iq_abs = fabsf(target_iq);
     last_point = &current_loop_schedule_table[table_size - 1U];
 
+    /* 小于最小标定点：钳制到最小点参数 */
     if (iq_abs <= current_loop_schedule_table[0].iq_abs) {
         *ff_coef = current_loop_schedule_table[0].ff_coef;
         *integral_limit = current_loop_schedule_table[0].integral_limit;
         return;
     }
 
+    /* 大于最大标定点：钳制到最大点参数 */
     if (iq_abs >= last_point->iq_abs) {
         *ff_coef = last_point->ff_coef;
         *integral_limit = last_point->integral_limit;
         return;
     }
 
+    /* 在调度表中寻找 iq_abs 所在区间 */
     for (idx = 0U; idx < (table_size - 1U); idx++) {
         const CurrentLoopSchedulePoint_t *p0 = &current_loop_schedule_table[idx];
         const CurrentLoopSchedulePoint_t *p1 = &current_loop_schedule_table[idx + 1U];
 
         if (iq_abs <= p1->iq_abs) {
             const float span = p1->iq_abs - p0->iq_abs;
+
+            /* ratio 表示 iq_abs 在 p0~p1 区间内的位置 */
             const float ratio = (span > 0.0f) ? ((iq_abs - p0->iq_abs) / span) : 0.0f;
 
             *ff_coef = current_loop_lerp(p0->ff_coef, p1->ff_coef, ratio);
@@ -87,10 +157,19 @@ void CurrentLoop_GetScheduledParams(float target_iq,
         }
     }
 
+    /* 理论上不会执行到这里，作为兜底保护 */
     *ff_coef = last_point->ff_coef;
     *integral_limit = last_point->integral_limit;
 }
 
+
+/* ============================================================
+ * 绑定 Driver 到 Motor
+ *
+ * 作用：
+ * Motor 层不直接持有具体 PWM 输出细节，
+ * 只保存一个 Driver_t 指针，通过 Driver 层输出三相 PWM。
+ * ============================================================ */
 void linkDriver(Driver_t *driver, Motor_t *motor)
 {
     if (!driver || !motor) return;
@@ -98,110 +177,105 @@ void linkDriver(Driver_t *driver, Motor_t *motor)
     motor->driver = driver;
 }
 
-//预留代码：实现功能：把一个传感器对象的指针，挂到电机对象�?
+
+/* ============================================================
+ * 绑定 Sensor 到 Motor
+ *
+ * 作用：
+ * 把传感器对象挂到电机对象上。
+ * Motor 层之后只通过 Sensor_* 接口获取机械角、速度等信息，
+ * 不直接访问 AS5047P / AS5600 等具体编码器驱动。
+ * ============================================================ */
 void linkSensor(Sensor_t *sensor, Motor_t *motor)
 {
-    if (!sensor ||!motor) return;
+    if (!sensor || !motor) return;
 
     motor->sensor = sensor;
     motor->state.has_sensor = (sensor != NULL) ? 1U : 0U;
 }
 
+
+/* 绑定电流采样对象到 Motor */
 void linkCurrentSense(CurrentSense_t *Current_Sense, Motor_t *motor)
 {
-    if (!Current_Sense ||!motor) return;
-    motor -> current_sense = Current_Sense;
-    
+    if (!Current_Sense || !motor) return;
 
+    motor->current_sense = Current_Sense;
 }
 
-//预留代码，实现功能：电机硬件可用性检�?+ 参数约束整理 + 进入可使能状�?
-/*
-�?）检�?driver 是否已经连接并初始化�?
-     如果没有 driver，或�?driver->initialized 还没好，它直接报失败，电机状态置�?motor_init_failed，然后返�?0�?
-�?）更�?motor 状态为“初始化中”：
-    �?motor_status 置成 motor_initializing�?
-�?）做电压限制的安全检查：
-    它会检查：
-    如果 motor.voltage_limit > driver.voltage_limit
-    就把 motor 的限制压�?driver 的限制以�?
-    voltage_sensor_align 也不能超�?voltage_limit
-�?）更新控制器内部�?limit
-    它会调用�?
 
-    updateCurrentLimit(current_limit)
-    updateVoltageLimit(voltage_limit)
-    updateVelocityLimit(velocity_limit)
-
-    也就是说，init() 不是只配硬件�?
-    还顺便把控制器里依赖 limit 的东西同步好�?
-�?）整理电机参�?
-    如果只给了单个相电感 phase_inductance，但没有单独�?d/q 轴电感，它就�?d/q 都设成这个值�?
-
-    这是个很典型的“初始化期参数整理”�?
-�?）如果是开环而且没传感器，就给默认方�?
-
-    如果�?
-
-    没有 sensor
-    控制模式是开环角�?开环速度
-    方向还未�?
-
-    它就默认 sensor_direction = CW
-
-    这一步本质上是在补齐运行前提�?
-�?）延时后调用 enable()
-    这个很关键：
-    init() 最后会�?
-    延时
-    enable()
-    再延�?
-    把状态设�?motor_uncalibrated
-*/
+/* ============================================================
+ * FOCMotor_init()
+ *
+ * 功能：
+ * 完成 Motor 层的软件初始化检查和状态整理。
+ *
+ * 主要流程：
+ * 1. 检查 Motor 指针是否合法；
+ * 2. 检查 Driver 是否已经连接并初始化；
+ * 3. 检查 Sensor 是否可用；
+ * 4. 整理电压限制，保证 Motor 限制不超过 Driver 限制；
+ * 5. 整理电机参数，例如 Ld/Lq；
+ * 6. 对开环模式补默认方向；
+ * 7. 使能电机并进入未校准状态。
+ *
+ * 注意：
+ * 这个函数不是零位电角度校准。
+ * 执行完 init 后，电机状态仍然是 motor_uncalibrated，
+ * 后续还需要 Motor_CalibrateZeroElectricalAngle()。
+ * ============================================================ */
 uint8_t FOCMotor_init(Motor_t *FOC_Motor)
 {
     if (!FOC_Motor) {
         return 0;
     }
 
-
-
-
-    // 检�?driver 是否已连接并初始化完�?
+    /* Driver 是 Motor 正常输出 PWM 的前提。
+     * 如果 Driver 没有连接，或者 Driver_Init() 没有成功，
+     * 则 Motor 初始化失败。
+     */
     if (!FOC_Motor->driver || !(FOC_Motor->driver->initialized)) {
         FOC_Motor->state.motor_status = motor_init_failed;
         FOC_Motor->state.enabled = 0;
         return 0;
     }
+
+    /* 检查传感器是否已经初始化。
+     * 有 Sensor 才能进行闭环角度/速度/FOC 控制。
+     */
     if (FOC_Motor->sensor && FOC_Motor->sensor->initialized) {
         FOC_Motor->state.has_sensor = 1U;
     } else {
         FOC_Motor->state.has_sensor = 0U;
     }
 
-
-
-    // 通过第一步检查后，进入初始化中状�?
     FOC_Motor->state.motor_status = motor_initializing;
 
-    // �?）电压限制安全检查：电机限制不能超过驱动限制
+    /* 电压限制保护：
+     * Motor 的 voltage_limit 不允许超过 Driver 的最大输出限制。
+     */
     if (FOC_Motor->config.voltage_limit > FOC_Motor->driver->voltage_limit) {
         FOC_Motor->config.voltage_limit = FOC_Motor->driver->voltage_limit;
     }
+
+    /* 零位校准用的对齐电压也不能超过 Motor 的电压限制 */
     if (FOC_Motor->config.voltage_sensor_align > FOC_Motor->config.voltage_limit) {
         FOC_Motor->config.voltage_sensor_align = FOC_Motor->config.voltage_limit;
     }
-    //�?）更新控制器内部�?limit
-    // 这里假设有全局函数可以更新 PID �?limit，实际可能需要更复杂的结构设�?
 
-    //�?）整理电机参数：如果只给了单个相电感，就�?d/q 都设成这个�?
+    /* 电感参数整理：
+     * 如果只设置了 Ld 或 Lq 中的一个，则默认另一个相同。
+     * 对表贴式永磁同步电机，Ld/Lq 接近时这样处理是可接受的。
+     */
     if (FOC_Motor->param.Ld == 0.0f && FOC_Motor->param.Lq != 0.0f) {
         FOC_Motor->param.Ld = FOC_Motor->param.Lq;
     } else if (FOC_Motor->param.Lq == 0.0f && FOC_Motor->param.Ld != 0.0f) {
         FOC_Motor->param.Lq = FOC_Motor->param.Ld;
     }
 
-    //�?）开环且无传感器时，若方向未知则给默认方�?
+    /* 开环控制模式下，如果没有传感器且方向未知，
+     * 则给一个默认方向，避免后续控制逻辑没有方向信息。
+     */
     if ((FOC_Motor->state.has_sensor == 0U) &&
         ((FOC_Motor->config.control_mode == motor_control_openloop_angle) ||
          (FOC_Motor->config.control_mode == motor_control_openloop_velocity)) &&
@@ -209,77 +283,63 @@ uint8_t FOCMotor_init(Motor_t *FOC_Motor)
         FOC_Motor->state.sensor_direction = sensor_direction_cw;
     }
 
-    //�?）延�?-> 使能 -> 延时 -> 状态置为未校准
+    /* 使能前后给一点延时，给驱动芯片和 PWM 输出状态稳定的时间 */
     Platform_DelayMs(10);
     FOCMotor_enable(FOC_Motor);
     Platform_DelayMs(10);
-    FOC_Motor->state.motor_status = motor_uncalibrated;
 
+    /* 初始化完成后，电机还没有做零位电角度校准 */
+    FOC_Motor->state.motor_status = motor_uncalibrated;
 
     return 1;
 }
 
 
-
-
-
-
-//预留代码，实现功能：电机失能
-/*
-�?）如果有 current sense，就�?disable �?
-�?）把 PWM 输出清零
-�?）再禁用 driver
-�?）更新状态把 enabled = 0
-“先去能量，再断执行链�?
-*/
+/* ============================================================
+ * 电机失能
+ *
+ * 顺序：
+ * 1. 如果有电流采样模块，先关闭电流采样；
+ * 2. PWM 输出清零；
+ * 3. 关闭 Driver；
+ * 4. 更新 enabled 状态。
+ *
+ * 设计原则：
+ * 先去能量，再断执行链。
+ * ============================================================ */
 void FOCMotor_disable(Motor_t *motor)
 {
     if (!motor || !motor->driver) return;
     if (!motor->driver->initialized) return;
 
-     //如果�?current sense，就�?disable �?
     if (motor->current_sense) {
         CurrentSense_Disable(motor->current_sense);
     }
 
-    //�?PWM 输出清零
     Driver_SetPwm(motor->driver, 0.0f, 0.0f, 0.0f);
+    Driver_Disable(motor->driver);
 
-    //再禁�?driver
-    if (motor->driver) {
-        Driver_Disable(motor->driver);
-    }
-
-    //更新状态把 enabled = 0
     motor->state.enabled = 0;
 }
 
 
-//预留代码，实现功能：电机使能
-/*
-�?）使�?driver
-先调用：
-driver->enable()
-�?）立刻把 PWM 清零
-调用�?
-driver->setPwm(0,0,0)
-�?）如果有 current sense，就 enable
-�?）重置控制器状�?
-它会 reset�?
-PID_velocity
-P_angle
-PID_current_q
-PID_current_d
-�?）更�?enabled 标志
-�?enabled = 1
-
-*/
+/* ============================================================
+ * 电机使能
+ *
+ * 顺序：
+ * 1. 使能 Driver；
+ * 2. PWM 输出清零，避免一使能就输出未知占空比；
+ * 3. 如果有电流采样模块，则使能电流采样；
+ * 4. 更新 enabled 状态。
+ * ============================================================ */
 void FOCMotor_enable(Motor_t *motor)
 {
     if (!motor || !motor->driver) return;
     if (!motor->driver->initialized) return;
 
     Driver_Enable(motor->driver);
+
+    /* 使能后立即清零 PWM，保证安全 */
     Driver_SetPwm(motor->driver, 0.0f, 0.0f, 0.0f);
 
     if (motor->current_sense) {
@@ -290,9 +350,9 @@ void FOCMotor_enable(Motor_t *motor)
 }
 
 
-
+/* 初始化电机参数 */
 void MotorParam_Init(Motor_t *motor, float pole_pairs, float phase_resistance,
-                    float kv, float Ld, float Lq)
+                     float kv, float Ld, float Lq)
 {
     if (!motor) return;
 
@@ -301,18 +361,23 @@ void MotorParam_Init(Motor_t *motor, float pole_pairs, float phase_resistance,
     motor->param.kv = kv;
     motor->param.Ld = Ld;
     motor->param.Lq = Lq;
-
 }
 
-ATTR_OPT_FAST
-static float normalize_angle_0_2pi(float angle)
-{
-    float a = angle - (float)(int32_t)(angle * (1.0f / (2.0f * PI))) * (2.0f * PI);
-    return (a >= 0.0f) ? a : (a + 2.0f * PI);
-}
 
+/* ============================================================
+ * 根据机械角计算电角度
+ *
+ * 电角度 = pole_pairs * mechanical_angle - zero_electrical_angle
+ *
+ * 如果编码器方向为 CCW，则等效极对数取负，
+ * 这样可以统一处理正反方向。
+ *
+ * 该函数不做空指针检查，调用前必须保证 motor/sensor 合法，
+ * 因此命名为 Unchecked。
+ * ============================================================ */
 ATTR_OPT_FAST
-static ATTR_ALWAYS_INLINE float Motor_CalcElectricalAngleUnchecked(const Motor_t *motor, const Sensor_t *sensor)
+static ATTR_ALWAYS_INLINE float Motor_CalcElectricalAngleUnchecked(const Motor_t *motor,
+                                                                   const Sensor_t *sensor)
 {
     float mech_angle = sensor->data.shaft_angle;
     float pole_pairs = motor->param.pole_pairs;
@@ -322,10 +387,11 @@ static ATTR_ALWAYS_INLINE float Motor_CalcElectricalAngleUnchecked(const Motor_t
     }
 
     float elec_angle = pole_pairs * mech_angle - motor->zero_electrical_angle;
-    return normalize_angle_0_2pi(elec_angle);
+    return normalizeAngle(elec_angle);
 }
 
 
+/* 获取机械角 */
 float Motor_GetMechanicalAngle(Motor_t *motor)
 {
     if (!motor || !motor->sensor) {
@@ -339,6 +405,8 @@ float Motor_GetMechanicalAngle(Motor_t *motor)
     return Sensor_GetAngle(motor->sensor);
 }
 
+
+/* 获取当前电角度 */
 ATTR_OPT_FAST
 float Motor_GetElectricalAngle(Motor_t *motor)
 {
@@ -355,7 +423,17 @@ float Motor_GetElectricalAngle(Motor_t *motor)
 }
 
 
-
+/* ============================================================
+ * 更新传感器数据，并同步电角度
+ *
+ * 输入：
+ * dt：本次传感器更新周期，用于 Sensor 层速度估计
+ *
+ * 作用：
+ * 1. 调用 Sensor_Update() 更新机械角、跨圈角、速度；
+ * 2. 根据最新机械角计算电角度；
+ * 3. 存入 motor->electrical_angle。
+ * ============================================================ */
 uint8_t Motor_UpdateSensor(Motor_t *motor, float dt)
 {
     if (!motor || !motor->sensor) {
@@ -368,82 +446,105 @@ uint8_t Motor_UpdateSensor(Motor_t *motor, float dt)
 
     Sensor_Update(motor->sensor, dt);
 
-
     motor->electrical_angle = Motor_GetElectricalAngle(motor);
-
 
     return 1U;
 }
 
 
-
+/* 快速浮点限幅 */
 static ATTR_OPT_FAST ATTR_ALWAYS_INLINE float clampf_fast(float x, float low, float high)
 {
     return (x < low) ? low : ((x > high) ? high : x);
 }
 
-static ATTR_ALWAYS_INLINE void driver_set_pwm_fast(const Driver_t *driver,
-                                                   uint32_t ccr_a,
-                                                   uint32_t ccr_b,
-                                                   uint32_t ccr_c)
-{
-    volatile uint32_t *ccr = &driver->htim->Instance->CCR1;
-    ccr[(driver->chA >> 2U)] = ccr_a;
-    ccr[(driver->chB >> 2U)] = ccr_b;
-    ccr[(driver->chC >> 2U)] = ccr_c;
-}
 
+/* ============================================================
+ * BLDC_SetFVPWM()
+ *
+ * 功能：
+ * 根据 q 轴电压 uq 和电角度 sin/cos，计算三相 PWM。
+ *
+ * 输入：
+ * uq：q 轴电压命令，正负决定转矩方向
+ * st：sin(electrical_angle)
+ * ct：cos(electrical_angle)
+ *
+ * 当前实现：
+ * Ud = 0，只输出 q 轴电压。
+ *
+ * 流程：
+ * 1. 对 uq 做限幅；
+ * 2. 反 Park 变换得到 Ualpha/Ubeta；
+ * 3. Clarke 逆变换得到三相电压 Ua/Ub/Uc；
+ * 4. 使用零序注入，把三相电压平移到 [0, V_SUPPLY]；
+ * 5. 转换为 TIM CCR 比较值；
+ * 6. 写入 PWM。
+ * ============================================================ */
 ATTR_OPT_FAST
 static void BLDC_SetFVPWM(Motor_t *motor, float uq, float st, float ct)
 {
     if (!motor || !motor->driver || !motor->driver->htim) {
         return;
     }
+
+    /* uq 限幅，防止超过驱动允许输出 */
     float uq_limit = motor->driver->voltage_limit;
     if (uq_limit <= 0.0f || uq_limit > Uq_max) {
         uq_limit = Uq_max;
     }
+
     if (uq > uq_limit) {
         uq = uq_limit;
     } else if (uq < -uq_limit) {
         uq = -uq_limit;
     }
 
-    /* 1) 由电角度计算 sin/cos */
-
-
-    /* 2) 反Park+Clarke (Ud=0) 得到三相相电�?*/
+    /* 反 Park 变换：
+     * Ud = 0
+     * Ualpha = Ud*cos - Uq*sin = -Uq*sin
+     * Ubeta  = Ud*sin + Uq*cos =  Uq*cos
+     */
     float Ualpha = -uq * st;
     float Ubeta  =  uq * ct;
+
+    /* 逆 Clarke，得到三相中心对称电压 */
     float t      = _SQRT3 * Ubeta;
     float Ua     = Ualpha;
     float Ub     = (-Ualpha + t) * 0.5f;
     float Uc     = (-Ualpha - t) * 0.5f;
 
-    /* 3) SVPWM零序注入并映射到 [0, V_SUPPLY] */
+    /* 零序注入：
+     * 通过减去最大最小值的中点，把三相电压整体平移，
+     * 使其落入 [0, V_SUPPLY]，提高母线电压利用率。
+     */
     float Umax = Ua;
     if (Ub > Umax) Umax = Ub;
     if (Uc > Umax) Umax = Uc;
+
     float Umin = Ua;
     if (Ub < Umin) Umin = Ub;
     if (Uc < Umin) Umin = Uc;
+
     float Uzero = (V_SUPPLY * 0.5f) - (Umax + Umin) * 0.5f;
 
     Ua = clampf_fast(Ua + Uzero, 0.0f, V_SUPPLY);
     Ub = clampf_fast(Ub + Uzero, 0.0f, V_SUPPLY);
     Uc = clampf_fast(Uc + Uzero, 0.0f, V_SUPPLY);
 
-    /* 4) 电压转换为定时器比较�?*/
+    /* 电压映射到 PWM 比较值 */
     const float scale = (float)motor->driver->htim->Init.Period * (1.0f / V_SUPPLY);
     const uint32_t ccr_a = (uint32_t)(Ua * scale + 0.5f);
     const uint32_t ccr_b = (uint32_t)(Ub * scale + 0.5f);
     const uint32_t ccr_c = (uint32_t)(Uc * scale + 0.5f);
 
-    driver_set_pwm_fast(motor->driver, ccr_a, ccr_b, ccr_c);
+    Driver_SetCompareFast(motor->driver, ccr_a, ccr_b, ccr_c);
 }
 
 
-
+/* 施加一个固定电角度的 q 轴电压矢量。
+ * 主要用于零位电角度校准时吸住转子。
+ */
 static void Motor_ApplyAlignVector(Motor_t *motor, float uq, float elec_angle)
 {
     float st = sinf(elec_angle);
@@ -451,11 +552,15 @@ static void Motor_ApplyAlignVector(Motor_t *motor, float uq, float elec_angle)
     BLDC_SetFVPWM(motor, uq, st, ct);
 }
 
+
+/* 已经有 sin/cos 时直接输出 q 轴电压，避免重复计算三角函数 */
 void Motor_SetPhaseVoltageQBySinCos(Motor_t *motor, float uq, float sin_el, float cos_el)
 {
     BLDC_SetFVPWM(motor, uq, sin_el, cos_el);
 }
 
+
+/* 根据电角度输出 q 轴电压 */
 void Motor_SetPhaseVoltageQ(Motor_t *motor, float uq, float elec_angle)
 {
     float st = sinf(elec_angle);
@@ -464,6 +569,30 @@ void Motor_SetPhaseVoltageQ(Motor_t *motor, float uq, float elec_angle)
 }
 
 
+/* ============================================================
+ * 零位电角度校准
+ *
+ * 功能：
+ * 施加一个固定电角度电压矢量，使转子吸附到已知电角位置，
+ * 然后读取机械角，计算 zero_electrical_angle。
+ *
+ * 输入：
+ * align_voltage：校准电压
+ * align_angle  ：施加的对齐电角度
+ * settle_ms    ：等待转子稳定的时间
+ *
+ * 核心公式：
+ * zero_electrical_angle =
+ *     dir * pole_pairs * mech_align - theta_field
+ *
+ * 其中：
+ * mech_align  ：转子稳定后的机械角
+ * theta_field ：实际施加的磁场方向
+ *
+ * 注意：
+ * 这里对 mech_align 做圆均值，而不是普通平均。
+ * 因为角度是周期量，接近 0/2π 边界时普通平均会出错。
+ * ============================================================ */
 uint8_t Motor_CalibrateZeroElectricalAngle(Motor_t *motor,
                                            float align_voltage,
                                            float align_angle,
@@ -481,21 +610,25 @@ uint8_t Motor_CalibrateZeroElectricalAngle(Motor_t *motor,
         return 0U;
     }
 
-    // 1. 使能电机
+    /* 1. 使能电机 */
     FOCMotor_enable(motor);
 
-    // 2. 施加固定电角矢量，让转子吸到目标位置
+    /* 2. 施加固定电角度矢量，让转子吸附到指定位置 */
     Motor_ApplyAlignVector(motor, align_voltage, align_angle);
 
-    // 3. 等待转子稳定
+    /* 3. 等待机械转子稳定 */
     HAL_Delay(settle_ms);
 
-    // 4. 多次采样机械角，做圆均�?
+    /* 4. 多次采样机械角，做圆均值 */
     float sum_sin = 0.0f;
     float sum_cos = 0.0f;
 
     for (uint16_t i = 0; i < 32; i++) {
-        Sensor_Update(motor->sensor, 0.001f);   // 这里只是为了刷新角度，dt给个正值即�?
+        /* 这里只是刷新 Sensor 层角度数据。
+         * dt 给正值即可，不依赖这次速度估计。
+         */
+        Sensor_Update(motor->sensor, 0.001f);
+
         float a = Sensor_GetAngle(motor->sensor);
 
         sum_sin += sinf(a);
@@ -504,24 +637,28 @@ uint8_t Motor_CalibrateZeroElectricalAngle(Motor_t *motor,
         HAL_Delay(2);
     }
 
+    /* 圆均值角度 */
     float mech_align = atan2f(sum_sin, sum_cos);
-    mech_align = normalize_angle_0_2pi(mech_align);
+    mech_align = normalizeAngle(mech_align);
 
-    // 5. 根据当前设定的方向，计算 zero_electrical_angle
+    /* 根据传感器方向确定电角度正方向 */
     float dir = 1.0f;
     if (motor->state.sensor_direction == sensor_direction_ccw) {
         dir = -1.0f;
     }
 
-    float theta_field = normalize_angle_0_2pi(align_angle + 0.5f * PI);
-    motor->zero_electrical_angle =
-        normalize_angle_0_2pi(dir * motor->param.pole_pairs * mech_align - theta_field);
+    /* 注意：
+     * 这里 theta_field 使用 align_angle + π/2。
+     * 这是因为当前 Motor_ApplyAlignVector() 施加的是 q 轴电压，
+     * q 轴电压矢量与转子磁链/d 轴存在 90°关系。
+     */
+    float theta_field = normalizeAngle(align_angle + 0.5f * PI);
 
-    // 6. 去掉输出
+    motor->zero_electrical_angle =
+        normalizeAngle(dir * motor->param.pole_pairs * mech_align - theta_field);
+
+    /* 6. 校准完成后关闭 PWM 输出 */
     Driver_SetPwm(motor->driver, 0.0f, 0.0f, 0.0f);
 
     return 1U;
 }
-
-
-

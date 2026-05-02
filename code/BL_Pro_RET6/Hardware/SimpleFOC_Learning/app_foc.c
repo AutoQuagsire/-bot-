@@ -1,5 +1,5 @@
 #include "app_foc.h"
-#include "FOC.h"
+#include "foc_common.h"
 #include "Filter.h"
 #include "current_sense.h"
 #include "main.h"
@@ -290,11 +290,16 @@ static __attribute__((unused)) float App_MatrixStep(uint32_t now_ms, float vel)
     return uq;
 }
 
+
+
+/* 重置 PID 运行状态：只清积分、上次误差和输出，不改 PID 参数 */
 static void App_PIDResetRuntime(PID_t *pid)
 {
     PID_Reset(pid);
 }
 
+
+/* 清空电流环调试快照，避免打印到上一次残留数据 */
 static void App_CurrentLoopDebugClear(volatile CurrentLoopDebugSnapshot_t *debug)
 {
     if (debug == NULL) {
@@ -314,6 +319,10 @@ static void App_CurrentLoopDebugClear(volatile CurrentLoopDebugSnapshot_t *debug
     debug->pid_integral = 0.0f;
 }
 
+
+/* 对外部 target_iq 做斜率限制，生成电流环内部目标 iq_ref。
+ * 目的：把硬阶跃变成较平滑的内部参考，降低超调和下冲。
+ */
 static float App_CurrentLoopSlewIqRef(float iq_ref, float target_iq_cmd)
 {
     float delta = target_iq_cmd - iq_ref;
@@ -327,6 +336,11 @@ static float App_CurrentLoopSlewIqRef(float iq_ref, float target_iq_cmd)
     return iq_ref + delta;
 }
 
+
+/* 判断目标电流幅值是否正在下降。
+ * 只处理同方向下降，例如 +0.9 -> +0.6 或 -0.9 -> -0.6。
+ * 用于触发积分卸载限速，降低目标下降时的反向下冲。
+ */
 static uint8_t App_CurrentLoopIsTargetMagnitudeFalling(float target_iq, float prev_target_iq)
 {
     const float eps = CURRENT_LOOP_TARGET_STEP_EPS;
@@ -339,6 +353,19 @@ static uint8_t App_CurrentLoopIsTargetMagnitudeFalling(float target_iq, float pr
                      ((target_abs + eps) < prev_abs));
 }
 
+
+/* 电流环核心计算：
+ * 输入外部目标电流 target_iq_cmd 和当前 Iq 反馈，
+ * 输出最终 q 轴电压 Uq。
+ *
+ * 前馈模式：
+ *   iq_ref = slew(target_iq_cmd)
+ *   Uq = PI(iq_ref - filtered_iq) + iq_ref * R * ff_coef
+ *
+ * 纯 PI 模式：
+ *   iq_ref = target_iq_cmd
+ *   Uq = PI(iq_ref - filtered_iq)
+ */
 static float App_CurrentLoopComputeUq(Motor_t *motor,
                                       PID_t *pid,
                                       float target_iq_cmd,
@@ -362,6 +389,7 @@ static float App_CurrentLoopComputeUq(Motor_t *motor,
         return 0.0f;
     }
 
+    /* 前馈 PI 下启用 iq_ref 斜率限制；纯 PI 下直接跟随外部目标 */
     if ((use_feedforward != 0U) && (iq_ref_state != NULL)) {
         iq_ref = App_CurrentLoopSlewIqRef(*iq_ref_state, target_iq_cmd);
         *iq_ref_state = iq_ref;
@@ -370,20 +398,25 @@ static float App_CurrentLoopComputeUq(Motor_t *motor,
         *iq_ref_state = iq_ref;
     }
 
+    /* 根据 |iq_ref| 插值得到前馈系数和积分限幅 */
     CurrentLoop_GetScheduledParams(iq_ref, &ff_coef, &integral_limit);
     pid->integral_limit = integral_limit;
 
+    /* 前馈 PI 和纯 PI 使用不同积分分离阈值 */
     if (use_feedforward) {
         pid->I_SEP_RATIO = CURRENT_LOOP_I_SEP_RATIO;
     } else {
         pid->I_SEP_RATIO = CURRENT_LOOP_PURE_PI_I_SEP_RATIO;
     }
 
+    /* 目标电流幅值下降时，短时间启用积分卸载限速 */
     if ((use_feedforward != 0U) && (i_unload_limit_ticks != NULL)) {
         float prev_iq_ref = (debug != NULL) ? debug->iq_ref : iq_ref;
+
         if (App_CurrentLoopIsTargetMagnitudeFalling(iq_ref, prev_iq_ref)) {
             *i_unload_limit_ticks = CURRENT_LOOP_I_UNLOAD_LIMIT_TICKS;
         }
+
         if (*i_unload_limit_ticks > 0U) {
             pid_flags |= PID_CURRENT_LIMIT_I_UNLOAD;
             (*i_unload_limit_ticks)--;
@@ -392,10 +425,12 @@ static float App_CurrentLoopComputeUq(Motor_t *motor,
         *i_unload_limit_ticks = 0U;
     }
 
+    /* 电流 PI 主体 */
     PID_CalCurrent(pid, iq_ref, filtered_iq, pid_flags);
     pi_out = pid->output;
 
 #if CURRENT_LOOP_USE_FEEDFORWARD
+    /* 电压前馈项：用相电阻估算基础 Uq，PI 只修正残余误差 */
     if (use_feedforward) {
         ff_term = iq_ref * motor->param.phase_resistance * ff_coef;
     }
@@ -404,6 +439,8 @@ static float App_CurrentLoopComputeUq(Motor_t *motor,
 #endif
 
     uq_final = pi_out + ff_term;
+
+    /* 电压限幅优先级：Motor 配置 > Driver 限制 > PID 输出限制 */
     voltage_limit = motor->config.voltage_limit;
     if ((voltage_limit <= 0.0f) && (motor->driver != NULL)) {
         voltage_limit = motor->driver->voltage_limit;
@@ -411,8 +448,10 @@ static float App_CurrentLoopComputeUq(Motor_t *motor,
     if (voltage_limit <= 0.0f) {
         voltage_limit = pid->output_limit;
     }
+
     uq_final = constrain(uq_final, -voltage_limit, voltage_limit);
 
+    /* 保存调试快照，供串口打印或 FastLog 捕获 */
     if (debug != NULL) {
         debug->target_iq = target_iq_cmd;
         debug->iq_ref = iq_ref;
@@ -430,6 +469,10 @@ static float App_CurrentLoopComputeUq(Motor_t *motor,
     return uq_final;
 }
 
+
+/* 周期性打印电流环调试信息。
+ * 先关中断复制快照，再打印，避免打印过程中 ISR 正在改数据。
+ */
 static void App_PrintCurrentLoopDebugIfDue(void)
 {
     CurrentLoopDebugSnapshot_t left_debug;
@@ -460,6 +503,7 @@ static void App_PrintCurrentLoopDebugIfDue(void)
                      left_debug.integral_limit,
                      left_debug.pid_integral);
 #endif
+
 #if RIGHT_MOTOR_ENABLE
     USB_Debug_Printf("[CL][R] %.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
                      right_debug.target_iq,
@@ -476,6 +520,8 @@ static void App_PrintCurrentLoopDebugIfDue(void)
 #endif
 }
 
+
+/* 应用一组电流环 PID 参数，并保留原有输出限幅/积分分离下限等配置 */
 static void App_CurrentPIDApplyOne(PID_t *pid, float kp, float ki, float kd, float integral_limit)
 {
     float output_limit;
@@ -492,9 +538,15 @@ static void App_CurrentPIDApplyOne(PID_t *pid, float kp, float ki, float kd, flo
 
     PID_ParameterInitEx(pid, kp, ki, kd, integral_limit,
                         output_limit, i_err_min, i_sep_ratio);
+
     App_PIDResetRuntime(pid);
 }
 
+
+/* 同时设置左右电机电流环 PID。
+ * g_current_pid_mode = 0：前馈 PI 参数组；
+ * g_current_pid_mode != 0：纯 PI 对照参数组。
+ */
 void App_CurrentPID_SetSame(float kp, float ki, float kd, float integral_limit)
 {
     PID_t *pid1, *pid2;
@@ -517,6 +569,8 @@ void App_CurrentPID_SetSame(float kp, float ki, float kd, float integral_limit)
     __enable_irq();
 }
 
+
+/* 读取当前电流环 PID 参数，默认以左电机参数作为代表 */
 void App_CurrentPID_GetSame(float *kp, float *ki, float *kd, float *integral_limit)
 {
     float local_kp;
@@ -556,45 +610,51 @@ void App_CurrentPID_GetSame(float *kp, float *ki, float *kd, float *integral_lim
     }
 }
 
+
+/* 重置所有电流环运行状态。
+ * 注意：这里也会重置 iq_ref，因此目标电流改变后不会沿用旧斜坡状态。
+ */
 void App_ResetCurrentPIDs(void)
 {
     __disable_irq();
+
     App_PIDResetRuntime(&g_current_pid1);
     App_PIDResetRuntime(&g_current_pid2);
     App_PIDResetRuntime(&g_current_pid1_Common);
     App_PIDResetRuntime(&g_current_pid2_Common);
+
     App_CurrentLoopDebugClear(&g_current_loop_debug1);
     App_CurrentLoopDebugClear(&g_current_loop_debug2);
+
     g_current_i_unload_limit_ticks1 = 0U;
     g_current_i_unload_limit_ticks2 = 0U;
+
     g_current_iq_ref1 = Left_Target;
     g_current_iq_ref2 = Left_Target;
+
     __enable_irq();
 }
 
+
 /**
- * @brief  FOC 应用层对象初始化
- * @retval 1: 初始化成功
- *         0: 初始化失败
+ * @brief FOC 应用层对象初始化
  *
- * 初始化顺序说明：
- * 1. 先拿到 driver 实例，并初始化 PWM 输出
- * 2. 再初始化编码器底层驱动
- * 3. 然后把编码器挂到 Sensor 层，并初始化 Sensor
- * 4. 最后配置 Motor 参数，并把 Sensor / Driver 链接给 Motor
- *
- * 这个函数只负责“对象装配”，不负责校准动作
+ * 职责：
+ * - 初始化 Driver / Encoder / Sensor / CurrentSense；
+ * - 装配 Motor 对象；
+ * - 初始化速度环和电流环 PID；
+ * - 不执行零位电角度校准。
  */
 uint8_t App_FOCStack_Init(void)
 {
-    #if LEFT_MOTOR_ENABLE
-    /* 1) 获取左电机对应的 driver 实例 */
-     g_driver1 = Driver_GetInstance(DRIVER_LEFT);
-
-     if ( g_driver1 == NULL) {
+#if LEFT_MOTOR_ENABLE
+    /* 左电机 Driver 初始化 */
+    g_driver1 = Driver_GetInstance(DRIVER_LEFT);
+    if (g_driver1 == NULL) {
         USB_Debug_Printf("Driver_GetInstance1 failed\r\n");
         return 0U;
-    }    
+    }
+
     if (!Driver_Init(g_driver1,
                      &htim1,
                      TIM_CHANNEL_1,
@@ -605,28 +665,31 @@ uint8_t App_FOCStack_Init(void)
         return 0U;
     }
 
+    /* 左编码器底层驱动 + Sensor 层初始化 */
     if (!AS5047P_RW_Init(&g_enc1, &hspi3, EcdL_CS_GPIO_Port, EcdL_CS_Pin)) {
         USB_Debug_Printf("AS5047P_RW_Init1 failed\r\n");
         return 0U;
     }
-    Sensor_LinkAS5047P(&g_enc1, &g_sensor1);    
+
+    Sensor_LinkAS5047P(&g_enc1, &g_sensor1);
     if (!Sensor_Init(&g_sensor1)) {
         USB_Debug_Printf("Sensor_Init1 failed\r\n");
         return 0U;
     }
 
-
-    /*电流采样初始化相关*/
-    CurrentSense_Init(&g_current_sense1);//必须放最前面，因为会给参数全置零
+    /* 左电机电流采样初始化。
+     * CurrentSense_Init 必须放在最前，因为它会清空 CurrentSense 对象。
+     */
+    CurrentSense_Init(&g_current_sense1);
     CurrentSense_Config(&g_current_sense1, &hadc1, &htim3, TIM_CHANNEL_4);
-    CurrentSenseParam_Init(&g_current_sense1
-                        , FOC_SHUNT_RESISTOR_OHM
-                        , FOC_AMP_GAIN
-                        , 1
-                        , 1);
+    CurrentSenseParam_Init(&g_current_sense1,
+                           FOC_SHUNT_RESISTOR_OHM,
+                           FOC_AMP_GAIN,
+                           1,
+                           1);
     CurrentSense_CalibrateOffsets(&g_current_sense1);
 
-    /*电流采样初始化相关*/
+    /* 装配左 Motor 对象 */
     linkSensor(&g_sensor1, &g_motor1);
     linkDriver(g_driver1, &g_motor1);
     linkCurrentSense(&g_current_sense1, &g_motor1);
@@ -636,24 +699,16 @@ uint8_t App_FOCStack_Init(void)
     g_motor1.config.voltage_sensor_align = g_driver1->voltage_limit;
     g_motor1.zero_electrical_angle = 0.0f;
     g_motor1.state.sensor_direction = sensor_direction_cw;
+#endif
 
-    #endif
 
-    #if RIGHT_MOTOR_ENABLE
-    g_driver2 = Driver_GetInstance(DRIVER_RIGHT);    
-    if ( g_driver2 == NULL) {
+#if RIGHT_MOTOR_ENABLE
+    /* 右电机 Driver 初始化 */
+    g_driver2 = Driver_GetInstance(DRIVER_RIGHT);
+    if (g_driver2 == NULL) {
         USB_Debug_Printf("Driver_GetInstance2 failed\r\n");
         return 0U;
     }
-
-    /* 2) 初始化三相驱动输出
-     * 参数含义：
-     * - htim1：用于输出 PWM 的定时器
-     * - TIM_CHANNEL_1/3/4：三相对应的通道
-     * - 19 * 0.577f：最大相电压限制（你当前的写法）
-     */
-
-
 
     if (!Driver_Init(g_driver2,
                      &htim4,
@@ -665,27 +720,29 @@ uint8_t App_FOCStack_Init(void)
         return 0U;
     }
 
+    /* 右编码器底层驱动 + Sensor 层初始化 */
     if (!AS5047P_RW_Init(&g_enc2, &hspi1, EcdR_CS_GPIO_Port, EcdR_CS_Pin)) {
         USB_Debug_Printf("AS5047P_RW_Init2 failed\r\n");
         return 0U;
     }
-
-
 
     Sensor_LinkAS5047P(&g_enc2, &g_sensor2);
     if (!Sensor_Init(&g_sensor2)) {
         USB_Debug_Printf("Sensor_Init2 failed\r\n");
         return 0U;
     }
-    CurrentSense_Init(&g_current_sense2);//必须放最前面，因为会给参数全置零
+
+    /* 右电机电流采样初始化 */
+    CurrentSense_Init(&g_current_sense2);
     CurrentSense_Config(&g_current_sense2, &hadc2, &htim2, TIM_CHANNEL_2);
-    CurrentSenseParam_Init(&g_current_sense2
-                        , FOC_SHUNT_RESISTOR_OHM
-                        , FOC_AMP_GAIN
-                        , 1
-                        , 1);
+    CurrentSenseParam_Init(&g_current_sense2,
+                           FOC_SHUNT_RESISTOR_OHM,
+                           FOC_AMP_GAIN,
+                           1,
+                           1);
     CurrentSense_CalibrateOffsets(&g_current_sense2);
 
+    /* 装配右 Motor 对象 */
     linkSensor(&g_sensor2, &g_motor2);
     linkDriver(g_driver2, &g_motor2);
     linkCurrentSense(&g_current_sense2, &g_motor2);
@@ -695,10 +752,11 @@ uint8_t App_FOCStack_Init(void)
     g_motor2.config.voltage_sensor_align = g_driver2->voltage_limit;
     g_motor2.zero_electrical_angle = 0.0f;
     g_motor2.state.sensor_direction = sensor_direction_cw;
-    #endif
+#endif
 
 
 #if APP_SPEED_LOOP_ENABLE
+    /* 速度环 PID 初始化。当前速度环仍属于 V0.1 验证阶段 */
     PID_ParameterInitEx(&g_speed_pid1,
                         APP_SPEED_KP,
                         APP_SPEED_KI,
@@ -707,6 +765,7 @@ uint8_t App_FOCStack_Init(void)
                         APP_SPEED_UQ_LIMIT,
                         APP_SPEED_I_ERR_MIN,
                         APP_SPEED_I_SEP_RATIO);
+
     PID_ParameterInitEx(&g_speed_pid2,
                         APP_SPEED_KP,
                         APP_SPEED_KI,
@@ -716,17 +775,19 @@ uint8_t App_FOCStack_Init(void)
                         APP_SPEED_I_ERR_MIN,
                         APP_SPEED_I_SEP_RATIO);
 
-
     Left_Velocity_FOC_PID = g_speed_pid1;
     Left_Target = 0.3f;
     g_speed_fault1 = 0U;
     g_speed_fault2 = 0U;
 
-
-    LowPassFilter_Init(&g_speed_lpf1, 100.0f, FOC_FREQUENCY);   
-    LowPassFilter_Init(&g_speed_lpf2, 100.0f, FOC_FREQUENCY);   
+    /* 速度反馈低通，当前截止频率 100Hz */
+    LowPassFilter_Init(&g_speed_lpf1, 100.0f, FOC_FREQUENCY);
+    LowPassFilter_Init(&g_speed_lpf2, 100.0f, FOC_FREQUENCY);
 #endif
+
+
 #if APP_CURRENT_LOOP_ENABLE
+    /* 前馈 PI 电流环参数组 */
     PID_ParameterInitEx(&g_current_pid1,
                         APP_CURRENT_FF_KP,
                         APP_CURRENT_FF_KI,
@@ -735,6 +796,7 @@ uint8_t App_FOCStack_Init(void)
                         APP_CURRENT_OUT_LIMIT,
                         APP_CURRENT_I_ERR_MIN,
                         CURRENT_LOOP_I_SEP_RATIO);
+
     PID_ParameterInitEx(&g_current_pid2,
                         APP_CURRENT_FF_KP,
                         APP_CURRENT_FF_KI,
@@ -743,6 +805,8 @@ uint8_t App_FOCStack_Init(void)
                         APP_CURRENT_OUT_LIMIT,
                         APP_CURRENT_I_ERR_MIN,
                         CURRENT_LOOP_I_SEP_RATIO);
+
+    /* 纯 PI 对照参数组，保留用于实验对比 */
     PID_ParameterInitEx(&g_current_pid1_Common,
                         5.3f,
                         0.62f,
@@ -751,6 +815,7 @@ uint8_t App_FOCStack_Init(void)
                         11.0f,
                         0.05f,
                         CURRENT_LOOP_PURE_PI_I_SEP_RATIO);
+
     PID_ParameterInitEx(&g_current_pid2_Common,
                         5.3f,
                         0.62f,
@@ -759,8 +824,11 @@ uint8_t App_FOCStack_Init(void)
                         11.0f,
                         0.05f,
                         CURRENT_LOOP_PURE_PI_I_SEP_RATIO);
-    LowPassFilter_Init(&g_current_lpf1, 800.0f, FOC_FREQUENCY);   
-    LowPassFilter_Init(&g_current_lpf2, 800.0f, FOC_FREQUENCY); 
+
+    /* 电流反馈低通，当前截止频率 800Hz */
+    LowPassFilter_Init(&g_current_lpf1, 800.0f, FOC_FREQUENCY);
+    LowPassFilter_Init(&g_current_lpf2, 800.0f, FOC_FREQUENCY);
+
     App_ResetCurrentPIDs();
 #endif
 
@@ -768,56 +836,35 @@ uint8_t App_FOCStack_Init(void)
     return 1U;
 }
 
-/**
- * @brief  上电后的启动校准流程
- * @retval 1: 校准成功
- *         0: 校准失败
- *
- * 当前这里只做“零位电角度校准”：
- * - 给一个固定电压矢量
- * - 让转子吸到指定电角位置
- * - 读取此时机械角
- * - 反算 zero_electrical_angle
+
+/* 上电零位电角度校准。
+ * 当前左右电机均使用 q 轴固定矢量吸附转子，再反算 zero_electrical_angle。
  */
 uint8_t App_StartupCalibrate(void)
 {
-    /* 参数说明：
-     * - &g_motor1            : 要校准的电机对象
-     * - 2.0f                 : 对齐电压
-     * - 3.0f * PI / 2.0f     : 对齐目标电角度（3π/2）
-     * - 300                  : 对齐稳定等待时间，单位 ms
-     */
-    #if LEFT_MOTOR_ENABLE
+#if LEFT_MOTOR_ENABLE
     if (!Motor_CalibrateZeroElectricalAngle(&g_motor1, 5.0f, PI / 2.0f, 300)) {
         USB_Debug_Printf("Startup calibrate1 failed\r\n");
         return 0U;
     }
-    /* 打印校准结果，便于调试确认 */
-    USB_Debug_Printf("zero_elec1 = %.6f\r\n", g_motor1.zero_electrical_angle);
-    #endif
 
-    #if RIGHT_MOTOR_ENABLE
+    USB_Debug_Printf("zero_elec1 = %.6f\r\n", g_motor1.zero_electrical_angle);
+#endif
+
+#if RIGHT_MOTOR_ENABLE
     if (!Motor_CalibrateZeroElectricalAngle(&g_motor2, 5.0f, PI / 2.0f, 300)) {
         USB_Debug_Printf("Startup calibrate2 failed\r\n");
         return 0U;
     }
 
     USB_Debug_Printf("zero_elec2 = %.6f\r\n", g_motor2.zero_electrical_angle);
-    #endif
-    
+#endif
+
     return 1U;
 }
 
-/**
- * @brief 主循环中的应用层逻辑
- *
- * 当前先留空，后面可以逐步加入：
- * 1. Sensor_Update()
- * 2. 电角度更新
- * 3. 调试打印
- * 4. 开环测试
- * 5. 正式 FOC 闭环
- */
+
+/* 带死区的符号判断，用于电流采样正负号测试 */
 static int8_t app_sign_with_deadband(float v, float deadband)
 {
     if (v > deadband) {
@@ -829,6 +876,10 @@ static int8_t app_sign_with_deadband(float v, float deadband)
     return 0;
 }
 
+
+/* 在指定电角度施加 uq，并对 ia/ib 多次采样取平均。
+ * 用于判断电流采样方向是否正确。
+ */
 static PhaseCurrent_t app_measure_phase_current_avg(Motor_t *motor,
                                                     CurrentSense_t *cs,
                                                     float uq,
@@ -853,9 +904,15 @@ static PhaseCurrent_t app_measure_phase_current_avg(Motor_t *motor,
 
     avg.ia /= (float)APP_CS_SIGN_TEST_SAMPLE_CNT;
     avg.ib /= (float)APP_CS_SIGN_TEST_SAMPLE_CNT;
+
     return avg;
 }
 
+
+/* 单电机电流采样符号测试。
+ * 根据 0、π、π/2、3π/2 四个电角度下 ia/ib 的符号，
+ * 判断 A_SIGN / B_SIGN 是否需要翻转。
+ */
 static void app_current_sense_sign_test_one(const char *tag,
                                             Motor_t *motor,
                                             CurrentSense_t *cs)
@@ -885,6 +942,7 @@ static void app_current_sense_sign_test_one(const char *tag,
         HAL_Delay(10);
     }
 
+    /* 限制测试电压，避免符号测试时输出过大 */
     if ((motor->driver->voltage_limit > 0.0f) && (uq > motor->driver->voltage_limit * 0.3f)) {
         uq = motor->driver->voltage_limit * 0.3f;
     }
@@ -902,6 +960,7 @@ static void app_current_sense_sign_test_one(const char *tag,
 
     Motor_SetPhaseVoltageQ(motor, 0.0f, 0.0f);
 
+    /* 根据理论符号关系打分，负分表示建议翻转采样符号 */
     a_score += (app_sign_with_deadband(s_3pi_2.ia, APP_CS_SIGN_TEST_DEADBAND_A) == 1) ? 1 : -1;
     a_score += (app_sign_with_deadband(s_pi_2.ia, APP_CS_SIGN_TEST_DEADBAND_A) == -1) ? 1 : -1;
     b_score += (app_sign_with_deadband(s_0.ib, APP_CS_SIGN_TEST_DEADBAND_A) == 1) ? 1 : -1;
@@ -926,6 +985,8 @@ static void app_current_sense_sign_test_one(const char *tag,
     }
 }
 
+
+/* 左右电机电流采样符号测试入口 */
 void App_CurrentSenseSignTest(void)
 {
     USB_Debug_Printf("[CS-SIGN] test begin (run with motor unloaded and hold rotor still)\r\n");
@@ -941,18 +1002,26 @@ void App_CurrentSenseSignTest(void)
     USB_Debug_Printf("[CS-SIGN] test end\r\n");
 }
 
+
+/* 计算两个角度之间的最短有符号差值，范围约为 [-π, π] */
 static float app_angle_diff_signed(float from, float to)
 {
     float d = to - from;
+
     while (d > PI) {
         d -= 2.0f * PI;
     }
     while (d < -PI) {
         d += 2.0f * PI;
     }
+
     return d;
 }
 
+
+/* 施加指定电角度电压矢量，等待转子稳定后读取机械角。
+ * 用 DWT 做近似 ms 延时，同时持续刷新 Sensor。
+ */
 static float app_sensor_angle_after_settle(Motor_t *motor,
                                            Sensor_t *sensor,
                                            float uq,
@@ -979,6 +1048,7 @@ static float app_sensor_angle_after_settle(Motor_t *motor,
 
     for (i = 0U; i < step_ms; i++) {
         Sensor_Update(sensor, 0.001f);
+
         t0 = DWT_GetTicks();
         do {
             t1 = DWT_GetElapsedTicks(t0);
@@ -989,6 +1059,11 @@ static float app_sensor_angle_after_settle(Motor_t *motor,
     return Sensor_GetAngle(sensor);
 }
 
+
+/* 单电机传感器方向测试。
+ * 正向电角度步进时机械角应该按同一方向变化；
+ * 反向电角度步进时机械角应该反向变化。
+ */
 static void app_sensor_direction_test_one(const char *tag, Motor_t *motor, Sensor_t *sensor)
 {
     uint8_t was_enabled;
@@ -1000,7 +1075,8 @@ static void app_sensor_direction_test_one(const char *tag, Motor_t *motor, Senso
     float dn;
     int8_t score = 0;
 
-    if ((motor == NULL) || (sensor == NULL) || (motor->driver == NULL) || (!motor->driver->initialized) || (!sensor->initialized)) {
+    if ((motor == NULL) || (sensor == NULL) || (motor->driver == NULL) ||
+        (!motor->driver->initialized) || (!sensor->initialized)) {
         USB_Debug_Printf("[DIR-TEST][%s] skip (motor/sensor not ready)\r\n", tag);
         return;
     }
@@ -1018,20 +1094,17 @@ static void app_sensor_direction_test_one(const char *tag, Motor_t *motor, Senso
         uq = 0.3f;
     }
 
-    USB_Debug_Printf("[DIR-TEST][%s] start uq=%.2fV elec_step=%.3f\r\n", tag, uq, APP_SENSOR_DIR_TEST_ELEC_STEP);
+    USB_Debug_Printf("[DIR-TEST][%s] start uq=%.2fV elec_step=%.3f\r\n",
+                     tag, uq, APP_SENSOR_DIR_TEST_ELEC_STEP);
 
-    USB_Debug_Printf("[DIR-TEST][%s] step a0...\r\n", tag);
     a0 = app_sensor_angle_after_settle(motor, sensor, uq, 0.0f, APP_SENSOR_DIR_TEST_SETTLE_MS);
-    USB_Debug_Printf("[DIR-TEST][%s] step +elec...\r\n", tag);
     ap = app_sensor_angle_after_settle(motor, sensor, uq, APP_SENSOR_DIR_TEST_ELEC_STEP, APP_SENSOR_DIR_TEST_SETTLE_MS);
-    USB_Debug_Printf("[DIR-TEST][%s] step -elec...\r\n", tag);
     an = app_sensor_angle_after_settle(motor, sensor, uq, -APP_SENSOR_DIR_TEST_ELEC_STEP, APP_SENSOR_DIR_TEST_SETTLE_MS);
-    USB_Debug_Printf("[DIR-TEST][%s] step done\r\n", tag);
 
     Motor_SetPhaseVoltageQ(motor, 0.0f, 0.0f);
 
-    dp = app_angle_diff_signed(a0, ap);  /* +elec step */
-    dn = app_angle_diff_signed(a0, an);  /* -elec step */
+    dp = app_angle_diff_signed(a0, ap);
+    dn = app_angle_diff_signed(a0, an);
 
     if (dp > APP_SENSOR_DIR_TEST_DEADBAND_RAD) {
         score++;
@@ -1061,6 +1134,8 @@ static void app_sensor_direction_test_one(const char *tag, Motor_t *motor, Senso
     }
 }
 
+
+/* 左右电机传感器方向测试入口 */
 void App_SensorDirectionTest(void)
 {
     USB_Debug_Printf("[DIR-TEST] begin (motor should be free to move, not held)\r\n");
@@ -1068,6 +1143,7 @@ void App_SensorDirectionTest(void)
 #if LEFT_MOTOR_ENABLE
     app_sensor_direction_test_one("L", &g_motor1, &g_sensor1);
 #endif
+
     HAL_Delay(500);
 
 #if RIGHT_MOTOR_ENABLE
@@ -1077,9 +1153,14 @@ void App_SensorDirectionTest(void)
     USB_Debug_Printf("[DIR-TEST] end\r\n");
 }
 
+
+/* 非中断版应用循环：主要用于早期开环/速度环调试。
+ * 正式 10kHz FOC 闭环目前走 App_LoopForIT()。
+ */
 void App_Loop(void)
 {
     uint32_t now_ms = HAL_GetTick();
+
     if (g_last_loop_tick_ms == 0U) {
         g_last_loop_tick_ms = now_ms;
         return;
@@ -1089,9 +1170,11 @@ void App_Loop(void)
     if (dt_ms == 0U) {
         return;
     }
+
     g_last_loop_tick_ms = now_ms;
 
     float dt = (float)dt_ms * 0.001f;
+
     if (!Motor_UpdateSensor(&g_motor1, dt)) {
         return;
     }
@@ -1121,11 +1204,13 @@ void App_Loop(void)
 
     float sin_e1 = 0.0f;
     float cos_e1 = 0.0f;
+
     Get_SinCos(elec_angle, &sin_e1, &cos_e1);
     Motor_SetPhaseVoltageQBySinCos(&g_motor1, uq_cmd, sin_e1, cos_e1);
 
     if ((now_ms - g_last_print_tick_ms) >= APP_LOOP_PRINT_PERIOD_MS) {
         g_last_print_tick_ms = now_ms;
+
 #if APP_SPEED_LOOP_ENABLE
         USB_Debug_Printf("tgt=%.2f vel=%.3f err=%.3f uq=%.2f mech=%.4f elec=%.4f fault=%u\r\n",
                          vel_target,
@@ -1146,14 +1231,14 @@ void App_Loop(void)
 }
 
 
-
-
+/* 启动 FOC 控制定时器中断 */
 void App_FOCControlIT_Enable(void)
 {
-  HAL_TIM_Base_Start_IT(&htim5);
+    HAL_TIM_Base_Start_IT(&htim5);
 }
 
 
+/* 速度环调试变量 */
 float vel1 = 0;
 float vel_windowed1 = 0;
 float vel_windowed_f1 = 0;
@@ -1163,10 +1248,12 @@ float vel2 = 0;
 float vel_windowed2 = 0;
 float vel_windowed_f2 = 0;
 float uq_cmd2 = APP_LOOP_TEST_UQ_V;
+
+/* move() 降采样计数器：速度环不必和 10kHz 电流环同频 */
 static uint16_t g_move_downsample_cnt = 0U;
 
 
-
+/* 电流环观测变量 */
 PhaseCurrent_t Left_Current = {0.0f, 0.0f};
 float Left_RawIq = 0.0f;
 float Left_FilteredIq = 0.0f;
@@ -1175,6 +1262,8 @@ PhaseCurrent_t Right_Current = {0.0f, 0.0f};
 float Right_RawIq = 0.0f;
 float Right_FilteredIq = 0.0f;
 
+
+/* 重置速度环 PID 运行状态 */
 void App_ResetSpeedPIDs(void)
 {
     __disable_irq();
@@ -1183,7 +1272,10 @@ void App_ResetSpeedPIDs(void)
     __enable_irq();
 }
 
-/* ── FastLog: one-shot 2048-sample capture, armed on PID update ── */
+
+/* FastLog：一次性高速采样缓存。
+ * 用于捕获电流阶跃响应，避免实时串口打印影响 10kHz 控制循环。
+ */
 #define APP_FASTLOG_SIZE (512U)
 
 typedef struct {
@@ -1209,12 +1301,19 @@ static volatile uint8_t  g_fastlog_done  = 0U;
 static volatile uint32_t g_fastlog_capture_id = 0U;
 static volatile uint8_t  g_fastlog_blocked = 0U;
 
+
+/* FastLog 上膛。
+ * force_rearm = 0：只有空闲时允许重新采样；
+ * force_rearm = 1：强制重新开始一轮采样。
+ */
 static uint8_t app_fastlog_try_arm_internal(uint8_t force_rearm)
 {
     uint8_t can_arm;
 
     __disable_irq();
+
     can_arm = (uint8_t)(force_rearm || ((!g_fastlog_armed) && (!g_fastlog_done)));
+
     if (can_arm) {
         g_fastlog_count = 0U;
         g_fastlog_armed = 1U;
@@ -1224,6 +1323,7 @@ static uint8_t app_fastlog_try_arm_internal(uint8_t force_rearm)
     } else {
         g_fastlog_blocked = 1U;
     }
+
     __enable_irq();
 
     return can_arm;
@@ -1246,6 +1346,8 @@ void App_StopFastLog(void)
     __enable_irq();
 }
 
+
+/* 获取 FastLog 状态，供上位机/命令接口查询 */
 void App_GetFastLogStatus(uint16_t *count,
                           uint8_t *armed,
                           uint8_t *done,
@@ -1283,16 +1385,26 @@ void App_GetFastLogStatus(uint16_t *count,
     }
 }
 
+
+/* 在 10kHz 控制循环中记录一帧 FastLog。
+ * 这里只写 RAM，不做串口输出，保证实时性。
+ */
 static void fastlog_push(const Motor_t *motor, volatile const CurrentLoopDebugSnapshot_t *debug)
 {
     uint16_t n;
-    if ((!g_fastlog_armed) || (debug == NULL)) return;
-    n = g_fastlog_count;
-    if (n >= APP_FASTLOG_SIZE) {
-        g_fastlog_armed = 0U;
-        g_fastlog_done  = 1U;
+
+    if ((!g_fastlog_armed) || (debug == NULL)) {
         return;
     }
+
+    n = g_fastlog_count;
+
+    if (n >= APP_FASTLOG_SIZE) {
+        g_fastlog_armed = 0U;
+        g_fastlog_done = 1U;
+        return;
+    }
+
     g_fastlog_buf[n].target_iq = debug->target_iq;
     g_fastlog_buf[n].iq_ref = debug->iq_ref;
     g_fastlog_buf[n].filtered_iq = debug->filtered_iq;
@@ -1303,6 +1415,7 @@ static void fastlog_push(const Motor_t *motor, volatile const CurrentLoopDebugSn
     g_fastlog_buf[n].ff_coef = debug->ff_coef;
     g_fastlog_buf[n].integral_limit = debug->integral_limit;
     g_fastlog_buf[n].pid_integral = debug->pid_integral;
+
     if ((motor != NULL) && (motor->sensor != NULL)) {
         g_fastlog_buf[n].shaft_angle = motor->sensor->data.shaft_angle;
         g_fastlog_buf[n].shaft_velocity = motor->sensor->data.shaft_velocity;
@@ -1312,26 +1425,37 @@ static void fastlog_push(const Motor_t *motor, volatile const CurrentLoopDebugSn
         g_fastlog_buf[n].shaft_velocity = 0.0f;
         g_fastlog_buf[n].electrical_angle = 0.0f;
     }
+
     g_fastlog_count = (uint16_t)(n + 1U);
+
     if ((uint16_t)(n + 1U) >= APP_FASTLOG_SIZE) {
         g_fastlog_armed = 0U;
-        g_fastlog_done  = 1U;
+        g_fastlog_done = 1U;
     }
 }
 
+
+/* 10kHz FOC 主体：
+ * 1. 更新传感器和电角度；
+ * 2. 计算 sin/cos；
+ * 3. 读取相电流并计算 Iq；
+ * 4. 电流环计算 Uq；
+ * 5. 输出 FVPWM；
+ * 6. 可选 FastLog 记录。
+ */
 static uint8_t loopFOC(void)
 {
-    #if LEFT_MOTOR_ENABLE
+#if LEFT_MOTOR_ENABLE
     if (!Motor_UpdateSensor(&g_motor1, FOC_PERIOD_S)) {
         return 0U;
     }
-    #endif
+#endif
 
-    #if RIGHT_MOTOR_ENABLE
+#if RIGHT_MOTOR_ENABLE
     if (!Motor_UpdateSensor(&g_motor2, FOC_PERIOD_S)) {
         return 0U;
     }
-    #endif
+#endif
 
     {
         float sin_e1 = 0.0f;
@@ -1339,26 +1463,22 @@ static uint8_t loopFOC(void)
         float sin_e2 = 0.0f;
         float cos_e2 = 0.0f;
 
-    #if LEFT_MOTOR_ENABLE
+#if LEFT_MOTOR_ENABLE
         Get_SinCos(g_motor1.electrical_angle, &sin_e1, &cos_e1);
-    #endif
+#endif
 
-    #if RIGHT_MOTOR_ENABLE
+#if RIGHT_MOTOR_ENABLE
         Get_SinCos(g_motor2.electrical_angle, &sin_e2, &cos_e2);
-    #endif
+#endif
 
-    float Uq_cmd1 = 0.0f;
-    float Uq_cmd2 = 0.0f;
+        float Uq_cmd1 = 0.0f;
+        float Uq_cmd2 = 0.0f;
 
-    #if APP_CURRENT_LOOP_ENABLE && APP_CURRENT_LOOP_ENABLE
-        /* CurrentLoop_FFPI_V1:
-         * Uq = PI(Iq_ref - Iq_meas) + Iq_ref * R_phase * ff_coef
-         * Feedforward provides the base voltage estimate and PI only
-         * corrects dynamic error plus residual steady-state error.
-         */
+#if LEFT_MOTOR_ENABLE && APP_CURRENT_LOOP_ENABLE
         Left_Current = CurrentSense_GetPhaseCurrent(&g_current_sense1);
         Left_RawIq = CurrentSense_CalcIq(&g_current_sense1, sin_e1, cos_e1);
         Left_FilteredIq = LowPassFilter_Update(&g_current_lpf1, Left_RawIq);
+
         if (g_current_pid_mode == 0U) {
             Uq_cmd1 = App_CurrentLoopComputeUq(&g_motor1,
                                                &g_current_pid1,
@@ -1380,9 +1500,9 @@ static uint8_t loopFOC(void)
                                                &g_current_i_unload_limit_ticks1,
                                                &g_current_iq_ref1);
         }
-    #endif
+#endif
 
-    #if RIGHT_MOTOR_ENABLE && APP_CURRENT_LOOP_ENABLE
+#if RIGHT_MOTOR_ENABLE && APP_CURRENT_LOOP_ENABLE
         Right_Current = CurrentSense_GetPhaseCurrent(&g_current_sense2);
         Right_RawIq = CurrentSense_CalcIq(&g_current_sense2, sin_e2, cos_e2);
         Right_FilteredIq = LowPassFilter_Update(&g_current_lpf2, Right_RawIq);
@@ -1408,21 +1528,22 @@ static uint8_t loopFOC(void)
                                                &g_current_i_unload_limit_ticks2,
                                                &g_current_iq_ref2);
         }
-    #endif
+#endif
 
+        Motor_SetPhaseVoltageQBySinCos(&g_motor1, Uq_cmd1, sin_e1, cos_e1);
+        Motor_SetPhaseVoltageQBySinCos(&g_motor2, Uq_cmd2, sin_e2, cos_e2);
 
-    Motor_SetPhaseVoltageQBySinCos(&g_motor1, Uq_cmd1, sin_e1, cos_e1);
-    Motor_SetPhaseVoltageQBySinCos(&g_motor2, Uq_cmd2, sin_e2, cos_e2);
-
-    fastlog_push(&g_motor2, &g_current_loop_debug2);
-
-
-
-   }
+        /* 当前 FastLog 记录右电机电流环数据 */
+        fastlog_push(&g_motor2, &g_current_loop_debug2);
+    }
 
     return 1U;
 }
 
+
+/* 速度环/上层控制降频执行。
+ * 电流环 10kHz，速度环没必要同频，使用 APP_MOVE_DOWNSAMPLE 降采样。
+ */
 static void move(void)
 {
     float vel_target1 = Left_Target;
@@ -1447,6 +1568,7 @@ static void move(void)
     uq_cmd2 = APP_LOOP_TEST_UQ_V;
 #endif
 
+    /* 保存左速度环调试数据 */
     Left_Velocity_FOC_PID = g_speed_pid1;
     pid_csv_data.timestamp_ms = HAL_GetTick();
     pid_csv_data.setpoint = vel_target1;
@@ -1457,7 +1579,11 @@ static void move(void)
     pid_csv_data.i_term = g_speed_pid1.Ki * g_speed_pid1.error_integral;
     pid_csv_data.d_term = g_speed_pid1.Kd * (pid_csv_data.error - g_speed_pid1.last_error);
 }
-//10Khz中断内部程序
+
+
+/* 10kHz 定时器中断入口。
+ * loopFOC 每次执行；move() 按降采样周期执行。
+ */
 void App_LoopForIT(void)
 {
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
@@ -1474,16 +1600,17 @@ void App_LoopForIT(void)
     }
 
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-
 }
 
+
+/* 主循环调试输出。
+ * FastLog 采满后，在 while 里一次性打印，避免中断中串口阻塞。
+ */
 void DebuginWhile(void)
 {
     uint16_t i;
     uint16_t sample_count;
     uint32_t capture_id;
-
-    //App_PrintCurrentLoopDebugIfDue();
 
     if (!g_fastlog_done) {
         return;
@@ -1497,6 +1624,7 @@ void DebuginWhile(void)
     USB_Debug_Printf("[FASTLOG] capture=%lu samples=%u format=target_iq,iq_ref,filtered_iq,raw_iq,pi_out,ff_term,uq_final,ff_coef,integral_limit,pid_integral,shaft_angle,shaft_velocity,electrical_angle\r\n",
                      (unsigned long)capture_id,
                      (unsigned)sample_count);
+
     for (i = 0U; i < sample_count; i++) {
         USB_Debug_Printf("%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
                          g_fastlog_buf[i].target_iq,

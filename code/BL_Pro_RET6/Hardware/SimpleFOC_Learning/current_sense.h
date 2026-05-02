@@ -12,6 +12,14 @@ typedef void *CurrentSense_ADCHandle;
 #define _1_SQRT3  0.57735026919f
 #define _2_SQRT3  1.15470053838f
 
+#ifndef FOC_SHUNT_RESISTOR_OHM
+#define FOC_SHUNT_RESISTOR_OHM 0.02f
+#endif
+
+#ifndef FOC_AMP_GAIN
+#define FOC_AMP_GAIN 20.0f
+#endif
+
 
 
 

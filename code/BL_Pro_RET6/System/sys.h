@@ -17,7 +17,7 @@
 
 
 #include "INT.h"
-#include "FOC.h"
+#include "SimpleFOC_Learning/foc_common.h"
 #include "Filter.h"
 #include "usb_debug.h"
 

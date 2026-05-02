@@ -26,6 +26,26 @@ typedef struct {
     float voltage_limit;
 } Driver_t;
 
+/* Fast-path compare write.
+ * This relies on TIM_CHANNEL_x encoding so that (TIM_CHANNEL_x >> 2U)
+ * maps to CCR register index (CCR1..CCR4). */
+static inline void Driver_SetCompareFast(const Driver_t *driver,
+                                         uint32_t ccr_a,
+                                         uint32_t ccr_b,
+                                         uint32_t ccr_c)
+{
+    volatile uint32_t *ccr;
+
+    if ((driver == NULL) || (driver->htim == NULL)) {
+        return;
+    }
+
+    ccr = &driver->htim->Instance->CCR1;
+    ccr[(driver->chA >> 2U)] = ccr_a;
+    ccr[(driver->chB >> 2U)] = ccr_b;
+    ccr[(driver->chC >> 2U)] = ccr_c;
+}
+
 
 /* NOTE: remove any top-level function calls from headers. */
 

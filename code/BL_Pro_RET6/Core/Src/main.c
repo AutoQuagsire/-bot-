@@ -10,7 +10,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "FOC.h"
 #include "adc.h"
 #include "dma.h"
 #include "spi.h"

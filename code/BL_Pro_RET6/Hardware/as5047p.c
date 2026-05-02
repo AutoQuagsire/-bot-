@@ -366,7 +366,7 @@ AS5047P_Status AS5047P_GetAngle(AS5047P_Handle *dev)
     return AS5047P_OK;
 }
 __attribute__((optimize("O2")))
-float normalizeAngle(float angle)
+float normalizeAngleLegacy(float angle)
 {
     /* fmod(double,double) 会软件模拟 double 除法（~4 us）；
      * 改用 FPU 截断：VMUL + VCVT×2 + VMUL + VSUB ≈ 8 周期 */
