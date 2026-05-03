@@ -138,9 +138,6 @@ USBD_DescriptorsTypeDef CDC_Desc =
   USBD_CDC_SerialStrDescriptor,
   USBD_CDC_ConfigStrDescriptor,
   USBD_CDC_InterfaceStrDescriptor
-#if ((USBD_LPM_ENABLED == 1U) || (USBD_CLASS_BOS_ENABLED == 1))
-  , NULL
-#endif
 };
 
 #if defined ( __ICCARM__ ) /* IAR Compiler */

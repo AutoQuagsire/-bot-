@@ -13,24 +13,21 @@
 #include "adc.h"
 #include "dma.h"
 #include "spi.h"
-#include "stm32g4xx_hal.h"
 #include "tim.h"
 #include "usart.h"
-#include "usb_debug.h"
 #include "usb_device.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "sys.h"   /* 保留：INT.c 中有 extern AS5047P_Handle encoder_right */
-
 #include <math.h>
-
-
+#include "stm32g4xx_hal.h"
 #include "AS5047P_RW.h"
 #include "sensor.h"
 #include "BLDCMotor.h"
 #include "app_foc.h"
+#include "usb_debug.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -81,7 +78,7 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-   HAL_Init();
+  HAL_Init();
 
   /* USER CODE BEGIN Init */
   /* USER CODE END Init */
@@ -130,10 +127,10 @@ int main(void)
   {
     
     /* USER CODE END WHILE */
-    DebuginWhile();
-    Process_USB_Command();
-    /* USER CODE BEGIN 3 */
 
+    /* USER CODE BEGIN 3 */
+    Process_USB_Command();
+    DebuginWhile();
 
   }
   /* USER CODE END 3 */

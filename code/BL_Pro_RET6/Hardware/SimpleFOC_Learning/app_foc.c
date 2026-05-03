@@ -2,6 +2,7 @@
 #include "foc_common.h"
 #include "Filter.h"
 #include "current_sense.h"
+#include "BusVoltage.h"
 #include "main.h"
 #include "AS5047P_RW.h"
 #include "sensor.h"
@@ -12,6 +13,12 @@
 #include <math.h>
 #include <stdint.h>
 #include "PID.h"
+
+#if defined(__GNUC__)
+#define APP_FOC_HOT __attribute__((optimize("O2,fast-math")))
+#else
+#define APP_FOC_HOT
+#endif
 
 /* 这些外设句柄由 CubeMX 生成并在别处定义
  * 这里用 extern 引用，供应用层初始化时使用 */
@@ -27,6 +34,8 @@ extern TIM_HandleTypeDef htim4;
  * 所以统一放在 app_foc.c 内部静态保存
  */
 
+static BusVoltage_t g_bus_voltage;
+static BusVoltageDebug_t g_bus_voltage_debug;
 
 static Motor_t          g_motor1;   // 电机控制对象
 static Driver_t        *g_driver1 = NULL; // 三相驱动对象（由 Driver 模块提供实例）
@@ -54,6 +63,7 @@ LowPassFilter_t         g_current_lpf2;
 
 static uint32_t         g_last_loop_tick_ms = 0U;
 static uint32_t         g_last_print_tick_ms = 0U;
+static uint32_t         g_last_while_debug_tick_ms = 0U;
 static volatile CurrentLoopDebugSnapshot_t g_current_loop_debug1;
 static volatile CurrentLoopDebugSnapshot_t g_current_loop_debug2;
 static uint8_t g_current_i_unload_limit_ticks1 = 0U;
@@ -323,6 +333,7 @@ static void App_CurrentLoopDebugClear(volatile CurrentLoopDebugSnapshot_t *debug
 /* 对外部 target_iq 做斜率限制，生成电流环内部目标 iq_ref。
  * 目的：把硬阶跃变成较平滑的内部参考，降低超调和下冲。
  */
+APP_FOC_HOT
 static float App_CurrentLoopSlewIqRef(float iq_ref, float target_iq_cmd)
 {
     float delta = target_iq_cmd - iq_ref;
@@ -341,6 +352,7 @@ static float App_CurrentLoopSlewIqRef(float iq_ref, float target_iq_cmd)
  * 只处理同方向下降，例如 +0.9 -> +0.6 或 -0.9 -> -0.6。
  * 用于触发积分卸载限速，降低目标下降时的反向下冲。
  */
+APP_FOC_HOT
 static uint8_t App_CurrentLoopIsTargetMagnitudeFalling(float target_iq, float prev_target_iq)
 {
     const float eps = CURRENT_LOOP_TARGET_STEP_EPS;
@@ -366,6 +378,7 @@ static uint8_t App_CurrentLoopIsTargetMagnitudeFalling(float target_iq, float pr
  *   iq_ref = target_iq_cmd
  *   Uq = PI(iq_ref - filtered_iq)
  */
+APP_FOC_HOT
 static float App_CurrentLoopComputeUq(Motor_t *motor,
                                       PID_t *pid,
                                       float target_iq_cmd,
@@ -476,7 +489,6 @@ static float App_CurrentLoopComputeUq(Motor_t *motor,
 static void App_PrintCurrentLoopDebugIfDue(void)
 {
     CurrentLoopDebugSnapshot_t left_debug;
-    CurrentLoopDebugSnapshot_t right_debug;
     uint32_t now_ms = HAL_GetTick();
 
     if ((now_ms - g_last_current_debug_print_ms) < APP_CURRENT_DEBUG_PRINT_PERIOD_MS) {
@@ -486,7 +498,6 @@ static void App_PrintCurrentLoopDebugIfDue(void)
 
     __disable_irq();
     left_debug = g_current_loop_debug1;
-    right_debug = g_current_loop_debug2;
     __enable_irq();
 
 #if LEFT_MOTOR_ENABLE
@@ -502,21 +513,6 @@ static void App_PrintCurrentLoopDebugIfDue(void)
                      left_debug.ff_coef,
                      left_debug.integral_limit,
                      left_debug.pid_integral);
-#endif
-
-#if RIGHT_MOTOR_ENABLE
-    USB_Debug_Printf("[CL][R] %.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
-                     right_debug.target_iq,
-                     right_debug.iq_ref,
-                     right_debug.filtered_iq,
-                     right_debug.raw_iq,
-                     right_debug.error,
-                     right_debug.pi_out,
-                     right_debug.ff_term,
-                     right_debug.uq_final,
-                     right_debug.ff_coef,
-                     right_debug.integral_limit,
-                     right_debug.pid_integral);
 #endif
 }
 
@@ -647,6 +643,15 @@ void App_ResetCurrentPIDs(void)
  */
 uint8_t App_FOCStack_Init(void)
 {
+    BusVoltage_Setup(&g_bus_voltage, &hadc3);
+    BusVoltage_Enable(&g_bus_voltage);
+    BusVoltage_SampleOnce(&g_bus_voltage);
+    float first_bus_adc = BusVoltage_GetRawAdc(&g_bus_voltage);
+    float first_bus_Pinvoltage = BusVoltage_GetAdcPinVoltage(&g_bus_voltage);
+    float first_bus_voltage = BusVoltage_GetBusVoltage(&g_bus_voltage);
+    USB_Debug_Printf("BusVoltage: ADC,PinV,BusV:%.3f,%.3f,%.3f\r\n",
+                     first_bus_adc, first_bus_Pinvoltage, first_bus_voltage);
+    HAL_Delay(1000);
 #if LEFT_MOTOR_ENABLE
     /* 左电机 Driver 初始化 */
     g_driver1 = Driver_GetInstance(DRIVER_LEFT);
@@ -1250,7 +1255,7 @@ float vel_windowed_f2 = 0;
 float uq_cmd2 = APP_LOOP_TEST_UQ_V;
 
 /* move() 降采样计数器：速度环不必和 10kHz 电流环同频 */
-static uint16_t g_move_downsample_cnt = 0U;
+static uint16_t g_move_downsample_cnt = 10U;
 
 
 /* 电流环观测变量 */
@@ -1389,6 +1394,7 @@ void App_GetFastLogStatus(uint16_t *count,
 /* 在 10kHz 控制循环中记录一帧 FastLog。
  * 这里只写 RAM，不做串口输出，保证实时性。
  */
+APP_FOC_HOT
 static void fastlog_push(const Motor_t *motor, volatile const CurrentLoopDebugSnapshot_t *debug)
 {
     uint16_t n;
@@ -1443,6 +1449,7 @@ static void fastlog_push(const Motor_t *motor, volatile const CurrentLoopDebugSn
  * 5. 输出 FVPWM；
  * 6. 可选 FastLog 记录。
  */
+APP_FOC_HOT
 static uint8_t loopFOC(void)
 {
 #if LEFT_MOTOR_ENABLE
@@ -1533,8 +1540,8 @@ static uint8_t loopFOC(void)
         Motor_SetPhaseVoltageQBySinCos(&g_motor1, Uq_cmd1, sin_e1, cos_e1);
         Motor_SetPhaseVoltageQBySinCos(&g_motor2, Uq_cmd2, sin_e2, cos_e2);
 
-        /* 当前 FastLog 记录右电机电流环数据 */
-        fastlog_push(&g_motor2, &g_current_loop_debug2);
+        /* 当前 FastLog 记录左电机电流环数据 */
+        fastlog_push(&g_motor1, &g_current_loop_debug1);
     }
 
     return 1U;
@@ -1592,14 +1599,17 @@ void App_LoopForIT(void)
         HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
         return;
     }
-
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
     g_move_downsample_cnt++;
     if (g_move_downsample_cnt >= APP_MOVE_DOWNSAMPLE) {
+        BusVoltage_SampleOnce(&g_bus_voltage); 
+        g_bus_voltage_debug.bus_voltage = g_bus_voltage.data.bus_voltage;
+        g_bus_voltage_debug.adc_pin_voltage = g_bus_voltage.data.adc_pin_voltage;
+        g_bus_voltage_debug.raw_adc = g_bus_voltage.data.raw_adc;
         g_move_downsample_cnt = 0U;
         move();
     }
 
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
 }
 
 
@@ -1611,6 +1621,15 @@ void DebuginWhile(void)
     uint16_t i;
     uint16_t sample_count;
     uint32_t capture_id;
+    uint32_t now_ms;
+
+    now_ms = HAL_GetTick();
+    if ((now_ms - g_last_while_debug_tick_ms) >= APP_LOOP_PRINT_PERIOD_MS) {
+        g_last_while_debug_tick_ms = now_ms;
+    USB_Debug_Printf("BusVoltage: ADC,PinV,BusV:%.3f,%.3f,%.3f\r\n",
+                     g_bus_voltage_debug.raw_adc, g_bus_voltage_debug.adc_pin_voltage, g_bus_voltage_debug.bus_voltage);
+        /* 预留常规 while 调试输出入口，当前按需求先留空。 */
+    }
 
     if (!g_fastlog_done) {
         return;
@@ -1621,7 +1640,7 @@ void DebuginWhile(void)
     capture_id = g_fastlog_capture_id;
     __enable_irq();
 
-    USB_Debug_Printf("[FASTLOG] capture=%lu samples=%u format=target_iq,iq_ref,filtered_iq,raw_iq,pi_out,ff_term,uq_final,ff_coef,integral_limit,pid_integral,shaft_angle,shaft_velocity,electrical_angle\r\n",
+    USB_Debug_Printf("[FASTLOG] capture=%lu motor=L samples=%u format=target_iq,iq_ref,filtered_iq,raw_iq,pi_out,ff_term,uq_final,ff_coef,integral_limit,pid_integral,shaft_angle,shaft_velocity,electrical_angle\r\n",
                      (unsigned long)capture_id,
                      (unsigned)sample_count);
 

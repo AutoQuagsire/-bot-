@@ -2,6 +2,12 @@
 #include "current_sense.h"
 #include "usb_debug.h"
 
+#if defined(__GNUC__)
+#define CURRENT_SENSE_HOT __attribute__((optimize("O2,fast-math")))
+#else
+#define CURRENT_SENSE_HOT
+#endif
+
 
 
 /* 零偏校准参数：
@@ -68,6 +74,7 @@ void CurrentSense_Disable(CurrentSense_t *cs)
  * adc_buf[0] / adc_buf[1] 会被 DMA 持续更新，
  * 后续 CurrentSense_GetPhaseCurrent() 直接读取该缓存。
  */
+
 void CurrentSense_Enable(CurrentSense_t *cs)
 {
     if ((cs == NULL) || (cs->adc == NULL)) {
@@ -93,6 +100,7 @@ void CurrentSense_Enable(CurrentSense_t *cs)
  * 只负责清状态和填默认参数；
  * 不绑定 ADC/TIM，也不启动采样。
  */
+
 uint8_t CurrentSense_Init(CurrentSense_t *cs)
 {
     if (cs == NULL) {
@@ -130,6 +138,7 @@ uint8_t CurrentSense_Init(CurrentSense_t *cs)
  * 这里只保存句柄，不启动 ADC/DMA。
  * 真正启动在 CurrentSense_Enable()。
  */
+
 void CurrentSense_Config(CurrentSense_t *cs,
                          CurrentSense_ADCHandle adc,
                          CurrentSense_TIMHandle tim,
@@ -183,6 +192,7 @@ void CurrentSenseParam_Init(CurrentSense_t *cs,
  * 统计 ADC 静态电压，作为 offset_ia / offset_ib。
  * 后续真实电流计算时会先减去该偏置。
  */
+
 void CurrentSense_CalibrateOffsets(CurrentSense_t *cs)
 {
     uint8_t was_enabled;
@@ -259,6 +269,7 @@ void CurrentSense_CalibrateOffsets(CurrentSense_t *cs)
  * 计算流程：
  * ADC 原始值 -> 电压 -> 减零偏 -> 乘电压转电流增益 -> 乘符号修正。
  */
+CURRENT_SENSE_HOT
 PhaseCurrent_t CurrentSense_GetPhaseCurrent(CurrentSense_t *cs)
 {
     float tran_vol_a;
@@ -296,6 +307,7 @@ PhaseCurrent_t CurrentSense_GetPhaseCurrent(CurrentSense_t *cs)
  * Park 变换 q 轴：
  *     iq = i_beta * cos(theta) - i_alpha * sin(theta)
  */
+CURRENT_SENSE_HOT
 float CurrentSense_CalcIq(const CurrentSense_t *cs, float sint, float cost)
 {
     float i_alpha;

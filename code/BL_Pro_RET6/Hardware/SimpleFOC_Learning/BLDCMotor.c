@@ -106,6 +106,7 @@ static ATTR_ALWAYS_INLINE float current_loop_lerp(float a, float b, float t)
  * 不需要为每一个电流值单独测参数，
  * 只需要测几个关键电流点，然后通过插值平滑过渡。
  * ============================================================ */
+ATTR_OPT_FAST
 void CurrentLoop_GetScheduledParams(float target_iq,
                                     float *ff_coef,
                                     float *integral_limit)
@@ -434,6 +435,7 @@ float Motor_GetElectricalAngle(Motor_t *motor)
  * 2. 根据最新机械角计算电角度；
  * 3. 存入 motor->electrical_angle。
  * ============================================================ */
+ATTR_OPT_FAST
 uint8_t Motor_UpdateSensor(Motor_t *motor, float dt)
 {
     if (!motor || !motor->sensor) {

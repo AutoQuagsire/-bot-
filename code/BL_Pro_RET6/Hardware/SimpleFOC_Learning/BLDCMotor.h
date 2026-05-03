@@ -64,7 +64,7 @@
  * 0.2f
  */
 #ifndef CURRENT_LOOP_I_SEP_RATIO
-#define CURRENT_LOOP_I_SEP_RATIO 0.2f
+#define CURRENT_LOOP_I_SEP_RATIO 0.175f
 #endif
 
 
@@ -95,7 +95,7 @@
  * 该限速用于缓和积分项变化，使反向下冲更可控。
  */
 #ifndef CURRENT_LOOP_I_UNLOAD_STEP_MAX
-#define CURRENT_LOOP_I_UNLOAD_STEP_MAX 0.025f
+#define CURRENT_LOOP_I_UNLOAD_STEP_MAX 0.02f
 #endif
 
 
@@ -127,7 +127,7 @@
  * 该阈值用于避免由于浮点误差或微小抖动反复触发瞬态策略。
  */
 #ifndef CURRENT_LOOP_TARGET_STEP_EPS
-#define CURRENT_LOOP_TARGET_STEP_EPS 0.01f
+#define CURRENT_LOOP_TARGET_STEP_EPS 0.001f
 #endif
 
 

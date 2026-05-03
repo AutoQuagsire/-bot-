@@ -20,7 +20,7 @@
 #endif
 
 #ifndef V_SUPPLY
-#define V_SUPPLY 19.0f
+#define V_SUPPLY 19.5f
 #endif
 
 #ifndef Uq_max
