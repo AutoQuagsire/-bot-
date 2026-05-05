@@ -85,6 +85,7 @@ void Driver_LinkHardware(Driver_t *driver, TIM_HandleTypeDef *htim,
     driver->en_pin = en_pin;
     driver->enable_active_low = enable_active_low;
     driver->voltage_limit = voltage_limit;
+    driver->supply_voltage = voltage_limit;     //母线电压
     driver->enabled = 0;
     driver->initialized = 0;
 }
@@ -105,6 +106,7 @@ uint8_t Driver_Init(Driver_t *driver, TIM_HandleTypeDef *htim,
     driver->chB   = chB;
     driver->chC   = chC;
     driver->voltage_limit = voltage_limit;
+    driver->supply_voltage = voltage_limit;
 
     if (HAL_TIM_PWM_Start(driver->htim, driver->chA) != HAL_OK) return 0;
     if (HAL_TIM_PWM_Start(driver->htim, driver->chB) != HAL_OK) return 0;

@@ -2,6 +2,7 @@
 #include "./driver.h"
 #include "./current_sense.h"
 #include "./platform.h"
+#include "foc_common.h"
 #include <math.h>
 #include <stddef.h>
 
@@ -60,14 +61,14 @@ void Get_SinCos(float angle_el, float *sint, float *cost)
  * 参数调度主要取决于电流幅值。
  * ============================================================ */
 static const CurrentLoopSchedulePoint_t current_loop_schedule_table[] = {
-    {0.03f, 0.400f, 0.080f},
-    {0.10f, 0.450f, 0.125f},
-    {0.30f, 0.465f, 0.300f},
-    {0.60f, 0.500f, 0.350f},
-    {0.90f, 0.520f, 0.400f},
-    {1.20f, 0.550f, 0.650f},
-    {1.50f, 0.550f, 0.650f},
-    {1.80f, 0.550f, 0.650f},
+    {0.03f, 0.420f, 0.300f},
+    {0.10f, 0.460f, 0.300f},
+    {0.30f, 0.485f, 0.400f},
+    {0.60f, 0.500f, 0.500f},
+    {0.90f, 0.510f, 0.550f},
+    {1.20f, 0.520f, 0.580f},
+    {1.50f, 0.530f, 0.600f},
+    {1.80f, 0.540f, 0.650f},
 };
 
 
@@ -486,14 +487,30 @@ static ATTR_OPT_FAST ATTR_ALWAYS_INLINE float clampf_fast(float x, float low, fl
 ATTR_OPT_FAST
 static void BLDC_SetFVPWM(Motor_t *motor, float uq, float st, float ct)
 {
+    float vbus;
+    float uq_limit;
+    float uq_hw_max;
+
     if (!motor || !motor->driver || !motor->driver->htim) {
         return;
     }
 
-    /* uq 限幅，防止超过驱动允许输出 */
-    float uq_limit = motor->driver->voltage_limit;
-    if (uq_limit <= 0.0f || uq_limit > Uq_max) {
-        uq_limit = Uq_max;
+#if APP_BUS_VOLTAGE_FOC_ENABLE
+    /* 优先使用实时母线电压；异常时回退到编译期默认值。 */
+    vbus = motor->driver->supply_voltage;
+    if (vbus <= 0.0f || vbus > 26.0f) {
+        vbus = V_SUPPLY;
+    }
+#else
+    vbus = V_SUPPLY;
+#endif
+
+    uq_hw_max = vbus * 0.577f;
+
+    /* uq 限幅，既要满足控制层限制，也不能超过当前母线电压可实现范围。 */
+    uq_limit = motor->driver->voltage_limit;
+    if (uq_limit <= 0.0f || uq_limit > uq_hw_max) {
+        uq_limit = uq_hw_max;
     }
 
     if (uq > uq_limit) {
@@ -528,14 +545,14 @@ static void BLDC_SetFVPWM(Motor_t *motor, float uq, float st, float ct)
     if (Ub < Umin) Umin = Ub;
     if (Uc < Umin) Umin = Uc;
 
-    float Uzero = (V_SUPPLY * 0.5f) - (Umax + Umin) * 0.5f;
+    float Uzero = (vbus * 0.5f) - (Umax + Umin) * 0.5f;
 
-    Ua = clampf_fast(Ua + Uzero, 0.0f, V_SUPPLY);
-    Ub = clampf_fast(Ub + Uzero, 0.0f, V_SUPPLY);
-    Uc = clampf_fast(Uc + Uzero, 0.0f, V_SUPPLY);
+    Ua = clampf_fast(Ua + Uzero, 0.0f, vbus);
+    Ub = clampf_fast(Ub + Uzero, 0.0f, vbus);
+    Uc = clampf_fast(Uc + Uzero, 0.0f, vbus);
 
     /* 电压映射到 PWM 比较值 */
-    const float scale = (float)motor->driver->htim->Init.Period * (1.0f / V_SUPPLY);
+    const float scale = (float)motor->driver->htim->Init.Period * (1.0f / vbus);
     const uint32_t ccr_a = (uint32_t)(Ua * scale + 0.5f);
     const uint32_t ccr_b = (uint32_t)(Ub * scale + 0.5f);
     const uint32_t ccr_c = (uint32_t)(Uc * scale + 0.5f);

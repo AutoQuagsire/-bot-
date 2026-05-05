@@ -27,6 +27,24 @@
 #define Uq_max (V_SUPPLY * 0.577f)
 #endif
 
+/* Bus-voltage measurement / compensation switches.
+ *
+ * APP_BUS_VOLTAGE_ENABLE:
+ *   1 = enable ADC3 VBUS sampling, startup validity check, and debug values
+ *   0 = bypass VBUS sampling and use fixed V_SUPPLY as the bus voltage
+ *
+ * APP_BUS_VOLTAGE_FOC_ENABLE:
+ *   1 = use measured/filtered VBUS for FOC PWM modulation
+ *   0 = keep FOC PWM modulation on fixed V_SUPPLY
+ */
+#ifndef APP_BUS_VOLTAGE_ENABLE
+#define APP_BUS_VOLTAGE_ENABLE 1U
+#endif
+
+#ifndef APP_BUS_VOLTAGE_FOC_ENABLE
+#define APP_BUS_VOLTAGE_FOC_ENABLE APP_BUS_VOLTAGE_ENABLE
+#endif
+
 #ifndef _SQRT3
 #define _SQRT3 1.73205080757f
 #endif

@@ -129,9 +129,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    Process_USB_Command();
-    DebuginWhile();
 
+    DebuginWhile();
+    Process_USB_Command();
   }
   /* USER CODE END 3 */
 }

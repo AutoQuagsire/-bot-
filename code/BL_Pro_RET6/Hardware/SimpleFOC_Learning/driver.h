@@ -24,6 +24,7 @@ typedef struct {
     uint8_t enable_active_low;   // 1=低电平使能，0=高电平使能
 
     float voltage_limit;
+    float supply_voltage;
 } Driver_t;
 
 /* Fast-path compare write.

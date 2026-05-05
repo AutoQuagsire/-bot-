@@ -64,7 +64,7 @@
  * 0.2f
  */
 #ifndef CURRENT_LOOP_I_SEP_RATIO
-#define CURRENT_LOOP_I_SEP_RATIO 0.175f
+#define CURRENT_LOOP_I_SEP_RATIO 0.2f
 #endif
 
 
@@ -95,7 +95,7 @@
  * 该限速用于缓和积分项变化，使反向下冲更可控。
  */
 #ifndef CURRENT_LOOP_I_UNLOAD_STEP_MAX
-#define CURRENT_LOOP_I_UNLOAD_STEP_MAX 0.02f
+#define CURRENT_LOOP_I_UNLOAD_STEP_MAX 0.01f
 #endif
 
 
@@ -104,14 +104,14 @@
  *
  * 控制周期假设为 100us 时：
  *
- *     8 ticks = 0.8ms
+ *     4 ticks = 0.4ms
  *
  * 作用：
  * 只在目标刚发生阶跃后的短时间内限制积分卸载，
  * 避免长期影响稳态积分补偿能力。
  */
 #ifndef CURRENT_LOOP_I_UNLOAD_LIMIT_TICKS
-#define CURRENT_LOOP_I_UNLOAD_LIMIT_TICKS 8U
+#define CURRENT_LOOP_I_UNLOAD_LIMIT_TICKS 4U
 #endif
 
 
@@ -127,7 +127,7 @@
  * 该阈值用于避免由于浮点误差或微小抖动反复触发瞬态策略。
  */
 #ifndef CURRENT_LOOP_TARGET_STEP_EPS
-#define CURRENT_LOOP_TARGET_STEP_EPS 0.001f
+#define CURRENT_LOOP_TARGET_STEP_EPS 0.005f
 #endif
 
 
@@ -146,7 +146,7 @@
  * 减少 FF、P、I、积分限幅在目标突变时同时跳变造成的冲击。
  */
 #ifndef CURRENT_LOOP_IQ_REF_STEP_UP_MAX
-#define CURRENT_LOOP_IQ_REF_STEP_UP_MAX 0.025f
+#define CURRENT_LOOP_IQ_REF_STEP_UP_MAX 0.02f
 #endif
 
 
@@ -162,7 +162,7 @@
  * 但当前实验中 0.025A / 100us 对称斜坡已经可以作为工程定稿候选。
  */
 #ifndef CURRENT_LOOP_IQ_REF_STEP_DOWN_MAX
-#define CURRENT_LOOP_IQ_REF_STEP_DOWN_MAX 0.025f
+#define CURRENT_LOOP_IQ_REF_STEP_DOWN_MAX 0.02f
 #endif
 
 

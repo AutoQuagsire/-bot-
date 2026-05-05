@@ -35,7 +35,10 @@ extern TIM_HandleTypeDef htim4;
  */
 
 static BusVoltage_t g_bus_voltage;
-static BusVoltageDebug_t g_bus_voltage_debug;
+static volatile BusVoltageDebug_t g_bus_voltage_debug;
+static LowPassFilter_t g_bus_voltage_lpf;   //母线电压的低通滤波器
+static float g_bus_voltage_filtered = 0.0f;
+static uint8_t g_bus_voltage_valid = 0U;
 
 static Motor_t          g_motor1;   // 电机控制对象
 static Driver_t        *g_driver1 = NULL; // 三相驱动对象（由 Driver 模块提供实例）
@@ -64,6 +67,7 @@ LowPassFilter_t         g_current_lpf2;
 static uint32_t         g_last_loop_tick_ms = 0U;
 static uint32_t         g_last_print_tick_ms = 0U;
 static uint32_t         g_last_while_debug_tick_ms = 0U;
+static uint32_t         g_last_bus_voltage_sample_tick_ms = 0U;
 static volatile CurrentLoopDebugSnapshot_t g_current_loop_debug1;
 static volatile CurrentLoopDebugSnapshot_t g_current_loop_debug2;
 static uint8_t g_current_i_unload_limit_ticks1 = 0U;
@@ -71,6 +75,56 @@ static uint8_t g_current_i_unload_limit_ticks2 = 0U;
 static float g_current_iq_ref1 = 0.0f;
 static float g_current_iq_ref2 = 0.0f;
 static uint32_t g_last_current_debug_print_ms = 0U;
+
+#if APP_BUS_VOLTAGE_ENABLE
+static uint8_t App_BusVoltageStartupSample(void);
+#endif
+
+#define APP_BUS_VOLTAGE_SAMPLE_PERIOD_MS (10U)
+#define APP_BUS_VOLTAGE_LPF_CUTOFF_HZ (10.0f)
+#define APP_BUS_VOLTAGE_STARTUP_SAMPLE_COUNT (20U)
+#define APP_BUS_VOLTAGE_VALID_MIN_V (5.0f)
+#define APP_BUS_VOLTAGE_VALID_MAX_V (30.0f)
+
+static void App_ServiceBusVoltageSample(void)
+{
+#if APP_BUS_VOLTAGE_ENABLE
+    if (!BusVoltage_SampleOnce(&g_bus_voltage)) {
+        g_bus_voltage_valid = 0U;
+        return;
+    }
+
+    g_bus_voltage_debug.bus_voltage = BusVoltage_GetBusVoltage(&g_bus_voltage);
+    g_bus_voltage_debug.adc_pin_voltage = BusVoltage_GetAdcPinVoltage(&g_bus_voltage);
+    g_bus_voltage_debug.raw_adc = BusVoltage_GetRawAdc(&g_bus_voltage);
+
+    if ((g_bus_voltage_debug.bus_voltage < APP_BUS_VOLTAGE_VALID_MIN_V) ||
+        (g_bus_voltage_debug.bus_voltage > APP_BUS_VOLTAGE_VALID_MAX_V)) {
+        g_bus_voltage_valid = 0U;
+        return;
+    }
+
+    g_bus_voltage_valid = 1U;
+    g_bus_voltage_filtered = LowPassFilter_Update(&g_bus_voltage_lpf,
+                                                  g_bus_voltage_debug.bus_voltage);
+
+#if APP_BUS_VOLTAGE_FOC_ENABLE
+    /* 使用滤波后的母线电压参与 FOC 调制，原始值保留用于调试对比。 */
+    if (g_driver1 != NULL) {
+        g_driver1->supply_voltage = g_bus_voltage_filtered;
+    }
+    if (g_driver2 != NULL) {
+        g_driver2->supply_voltage = g_bus_voltage_filtered;
+    }
+#endif
+#else
+    g_bus_voltage_valid = 1U;
+    g_bus_voltage_debug.raw_adc = 0U;
+    g_bus_voltage_debug.adc_pin_voltage = 0.0f;
+    g_bus_voltage_debug.bus_voltage = V_SUPPLY;
+    g_bus_voltage_filtered = V_SUPPLY;
+#endif
+}
 
 
 
@@ -513,6 +567,10 @@ static void App_PrintCurrentLoopDebugIfDue(void)
                      left_debug.ff_coef,
                      left_debug.integral_limit,
                      left_debug.pid_integral);
+    USB_Debug_Printf("[BUS] %u,%.4f,%.4f\r\n",
+                     (unsigned)g_bus_voltage_debug.raw_adc,
+                     g_bus_voltage_debug.adc_pin_voltage,
+                     g_bus_voltage_debug.bus_voltage);
 #endif
 }
 
@@ -643,14 +701,31 @@ void App_ResetCurrentPIDs(void)
  */
 uint8_t App_FOCStack_Init(void)
 {
+#if APP_BUS_VOLTAGE_ENABLE
     BusVoltage_Setup(&g_bus_voltage, &hadc3);
     BusVoltage_Enable(&g_bus_voltage);
-    BusVoltage_SampleOnce(&g_bus_voltage);
-    float first_bus_adc = BusVoltage_GetRawAdc(&g_bus_voltage);
-    float first_bus_Pinvoltage = BusVoltage_GetAdcPinVoltage(&g_bus_voltage);
-    float first_bus_voltage = BusVoltage_GetBusVoltage(&g_bus_voltage);
-    USB_Debug_Printf("BusVoltage: ADC,PinV,BusV:%.3f,%.3f,%.3f\r\n",
-                     first_bus_adc, first_bus_Pinvoltage, first_bus_voltage);
+    LowPassFilter_Init(&g_bus_voltage_lpf,
+                       APP_BUS_VOLTAGE_LPF_CUTOFF_HZ,
+                       1000.0f / (float)APP_BUS_VOLTAGE_SAMPLE_PERIOD_MS);
+
+    if (!App_BusVoltageStartupSample()) {
+        USB_Debug_Printf("BusVoltage startup sample failed, PWM disabled\r\n");
+        return 0U;
+    }
+
+    USB_Debug_Printf("BusVoltage: ADC,PinV,BusV\r\n");
+    USB_Debug_Printf("%u,%.3f,%.3f\r\n",
+                     (unsigned)g_bus_voltage_debug.raw_adc,
+                     g_bus_voltage_debug.adc_pin_voltage,
+                     g_bus_voltage_debug.bus_voltage);
+#else
+    g_bus_voltage_valid = 1U;
+    g_bus_voltage_debug.raw_adc = 0U;
+    g_bus_voltage_debug.adc_pin_voltage = 0.0f;
+    g_bus_voltage_debug.bus_voltage = V_SUPPLY;
+    g_bus_voltage_filtered = V_SUPPLY;
+    USB_Debug_Printf("BusVoltage disabled, use fixed V_SUPPLY=%.3f\r\n", V_SUPPLY);
+#endif
     HAL_Delay(1000);
 #if LEFT_MOTOR_ENABLE
     /* 左电机 Driver 初始化 */
@@ -669,6 +744,11 @@ uint8_t App_FOCStack_Init(void)
         USB_Debug_Printf("Driver1_Init failed\r\n");
         return 0U;
     }
+#if APP_BUS_VOLTAGE_FOC_ENABLE
+    g_driver1->supply_voltage = g_bus_voltage_filtered;
+#else
+    g_driver1->supply_voltage = V_SUPPLY;
+#endif
 
     /* 左编码器底层驱动 + Sensor 层初始化 */
     if (!AS5047P_RW_Init(&g_enc1, &hspi3, EcdL_CS_GPIO_Port, EcdL_CS_Pin)) {
@@ -724,6 +804,11 @@ uint8_t App_FOCStack_Init(void)
         USB_Debug_Printf("Driver2_Init failed\r\n");
         return 0U;
     }
+#if APP_BUS_VOLTAGE_FOC_ENABLE
+    g_driver2->supply_voltage = g_bus_voltage_filtered;
+#else
+    g_driver2->supply_voltage = V_SUPPLY;
+#endif
 
     /* 右编码器底层驱动 + Sensor 层初始化 */
     if (!AS5047P_RW_Init(&g_enc2, &hspi1, EcdR_CS_GPIO_Port, EcdR_CS_Pin)) {
@@ -848,7 +933,7 @@ uint8_t App_FOCStack_Init(void)
 uint8_t App_StartupCalibrate(void)
 {
 #if LEFT_MOTOR_ENABLE
-    if (!Motor_CalibrateZeroElectricalAngle(&g_motor1, 5.0f, PI / 2.0f, 300)) {
+    if (!Motor_CalibrateZeroElectricalAngle(&g_motor1, 4.0f, PI / 2.0f, 300)) {
         USB_Debug_Printf("Startup calibrate1 failed\r\n");
         return 0U;
     }
@@ -857,7 +942,7 @@ uint8_t App_StartupCalibrate(void)
 #endif
 
 #if RIGHT_MOTOR_ENABLE
-    if (!Motor_CalibrateZeroElectricalAngle(&g_motor2, 5.0f, PI / 2.0f, 300)) {
+    if (!Motor_CalibrateZeroElectricalAngle(&g_motor2, 4.0f, PI / 2.0f, 300)) {
         USB_Debug_Printf("Startup calibrate2 failed\r\n");
         return 0U;
     }
@@ -1278,6 +1363,56 @@ void App_ResetSpeedPIDs(void)
 }
 
 
+#if APP_BUS_VOLTAGE_ENABLE
+static uint8_t App_BusVoltageStartupSample(void)
+{
+    uint32_t i;
+    uint32_t valid_count = 0U;
+    uint32_t raw_sum = 0U;
+    float adc_pin_sum = 0.0f;
+    float bus_sum = 0.0f;
+
+    g_bus_voltage_valid = 0U;
+
+    for (i = 0U; i < APP_BUS_VOLTAGE_STARTUP_SAMPLE_COUNT; i++) {
+        if (BusVoltage_SampleOnce(&g_bus_voltage)) {
+            const uint16_t raw_adc = BusVoltage_GetRawAdc(&g_bus_voltage);
+            const float adc_pin_voltage = BusVoltage_GetAdcPinVoltage(&g_bus_voltage);
+            const float bus_voltage = BusVoltage_GetBusVoltage(&g_bus_voltage);
+
+            if ((bus_voltage >= APP_BUS_VOLTAGE_VALID_MIN_V) &&
+                (bus_voltage <= APP_BUS_VOLTAGE_VALID_MAX_V)) {
+                raw_sum += raw_adc;
+                adc_pin_sum += adc_pin_voltage;
+                bus_sum += bus_voltage;
+                valid_count++;
+            }
+        }
+
+        HAL_Delay(1U);
+    }
+
+    if (valid_count == 0U) {
+        g_bus_voltage_debug.raw_adc = 0U;
+        g_bus_voltage_debug.adc_pin_voltage = 0.0f;
+        g_bus_voltage_debug.bus_voltage = 0.0f;
+        g_bus_voltage_filtered = 0.0f;
+        return 0U;
+    }
+
+    g_bus_voltage_debug.raw_adc =
+        (uint16_t)((raw_sum + (valid_count / 2U)) / valid_count);
+    g_bus_voltage_debug.adc_pin_voltage = adc_pin_sum / (float)valid_count;
+    g_bus_voltage_debug.bus_voltage = bus_sum / (float)valid_count;
+    g_bus_voltage_filtered = LowPassFilter_Update(&g_bus_voltage_lpf,
+                                                  g_bus_voltage_debug.bus_voltage);
+    g_bus_voltage_valid = 1U;
+
+    return 1U;
+}
+#endif
+
+
 /* FastLog：一次性高速采样缓存。
  * 用于捕获电流阶跃响应，避免实时串口打印影响 10kHz 控制循环。
  */
@@ -1297,6 +1432,9 @@ typedef struct {
     float shaft_angle;
     float shaft_velocity;
     float electrical_angle;
+    float bus_raw_adc;
+    float bus_pin_voltage;
+    float bus_voltage;
 } FastLogSample_t;
 
 static FastLogSample_t g_fastlog_buf[APP_FASTLOG_SIZE];
@@ -1421,6 +1559,9 @@ static void fastlog_push(const Motor_t *motor, volatile const CurrentLoopDebugSn
     g_fastlog_buf[n].ff_coef = debug->ff_coef;
     g_fastlog_buf[n].integral_limit = debug->integral_limit;
     g_fastlog_buf[n].pid_integral = debug->pid_integral;
+    g_fastlog_buf[n].bus_raw_adc = (float)g_bus_voltage_debug.raw_adc;
+    g_fastlog_buf[n].bus_pin_voltage = g_bus_voltage_debug.adc_pin_voltage;
+    g_fastlog_buf[n].bus_voltage = g_bus_voltage_debug.bus_voltage;
 
     if ((motor != NULL) && (motor->sensor != NULL)) {
         g_fastlog_buf[n].shaft_angle = motor->sensor->data.shaft_angle;
@@ -1599,17 +1740,13 @@ void App_LoopForIT(void)
         HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
         return;
     }
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+  
     g_move_downsample_cnt++;
     if (g_move_downsample_cnt >= APP_MOVE_DOWNSAMPLE) {
-        BusVoltage_SampleOnce(&g_bus_voltage); 
-        g_bus_voltage_debug.bus_voltage = g_bus_voltage.data.bus_voltage;
-        g_bus_voltage_debug.adc_pin_voltage = g_bus_voltage.data.adc_pin_voltage;
-        g_bus_voltage_debug.raw_adc = g_bus_voltage.data.raw_adc;
         g_move_downsample_cnt = 0U;
         move();
     }
-
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
 }
 
 
@@ -1624,10 +1761,19 @@ void DebuginWhile(void)
     uint32_t now_ms;
 
     now_ms = HAL_GetTick();
+#if APP_BUS_VOLTAGE_ENABLE
+    if ((now_ms - g_last_bus_voltage_sample_tick_ms) >= APP_BUS_VOLTAGE_SAMPLE_PERIOD_MS) {
+        g_last_bus_voltage_sample_tick_ms = now_ms;
+        App_ServiceBusVoltageSample();
+        // USB_Debug_Printf("BUS:%u,%.4f,%.4f\r\n",
+        //                  (unsigned)g_bus_voltage_debug.raw_adc,
+        //                  g_bus_voltage_filtered,
+        //                  g_bus_voltage_debug.bus_voltage);
+    }
+#endif
+
     if ((now_ms - g_last_while_debug_tick_ms) >= APP_LOOP_PRINT_PERIOD_MS) {
         g_last_while_debug_tick_ms = now_ms;
-    USB_Debug_Printf("BusVoltage: ADC,PinV,BusV:%.3f,%.3f,%.3f\r\n",
-                     g_bus_voltage_debug.raw_adc, g_bus_voltage_debug.adc_pin_voltage, g_bus_voltage_debug.bus_voltage);
         /* 预留常规 while 调试输出入口，当前按需求先留空。 */
     }
 
@@ -1640,12 +1786,12 @@ void DebuginWhile(void)
     capture_id = g_fastlog_capture_id;
     __enable_irq();
 
-    USB_Debug_Printf("[FASTLOG] capture=%lu motor=L samples=%u format=target_iq,iq_ref,filtered_iq,raw_iq,pi_out,ff_term,uq_final,ff_coef,integral_limit,pid_integral,shaft_angle,shaft_velocity,electrical_angle\r\n",
+    USB_Debug_Printf("[FASTLOG] capture=%lu motor=L samples=%u format=target_iq,iq_ref,filtered_iq,raw_iq,pi_out,ff_term,uq_final,ff_coef,integral_limit,pid_integral,shaft_angle,shaft_velocity,electrical_angle,bus_raw_adc,bus_pin_voltage,bus_voltage\r\n",
                      (unsigned long)capture_id,
                      (unsigned)sample_count);
 
     for (i = 0U; i < sample_count; i++) {
-        USB_Debug_Printf("%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
+        USB_Debug_Printf("%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
                          g_fastlog_buf[i].target_iq,
                          g_fastlog_buf[i].iq_ref,
                          g_fastlog_buf[i].filtered_iq,
@@ -1658,7 +1804,10 @@ void DebuginWhile(void)
                          g_fastlog_buf[i].pid_integral,
                          g_fastlog_buf[i].shaft_angle,
                          g_fastlog_buf[i].shaft_velocity,
-                         g_fastlog_buf[i].electrical_angle);
+                         g_fastlog_buf[i].electrical_angle,
+                         g_fastlog_buf[i].bus_raw_adc,
+                         g_fastlog_buf[i].bus_pin_voltage,
+                         g_fastlog_buf[i].bus_voltage);
     }
 
     __disable_irq();

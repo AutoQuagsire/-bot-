@@ -59,6 +59,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Hardware/SimpleFOC_Learning/platform.c
     Hardware/SimpleFOC_Learning/BLDCMotor.c
     Hardware/SimpleFOC_Learning/app_foc.c
+    Hardware/SimpleFOC_Learning/BusVoltage.c
+
     Hardware/Filter.c
 )
 

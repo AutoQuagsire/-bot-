@@ -24,7 +24,7 @@ typedef void *BusVoltage_TIMHandle;
  * network is confirmed.
  */
 #ifndef BUS_VOLTAGE_DIVIDER_RATIO
-#define BUS_VOLTAGE_DIVIDER_RATIO 8.68f
+#define BUS_VOLTAGE_DIVIDER_RATIO 8.8883f
 #endif
 
 typedef enum {
