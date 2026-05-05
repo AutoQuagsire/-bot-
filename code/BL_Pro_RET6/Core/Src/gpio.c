@@ -40,7 +40,6 @@
         * EXTI
      PC1   ------> LPUART1_TX
      PA3   ------> LPUART1_RX
-     PB13   ------> SPI2_SCK
 */
 void MX_GPIO_Init(void)
 {
@@ -106,14 +105,6 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(EcdR_CS_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : IMU_SCK_Pin */
-  GPIO_InitStruct.Pin = IMU_SCK_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF5_SPI2;
-  HAL_GPIO_Init(IMU_SCK_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : IMU_CS_Pin PC8 */
   GPIO_InitStruct.Pin = IMU_CS_Pin|GPIO_PIN_8;

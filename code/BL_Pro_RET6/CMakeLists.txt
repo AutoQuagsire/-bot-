@@ -46,30 +46,36 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
-    System/usb_debug.c
+    MyCode/System/usb_debug.c
+    MyCode/System/sys.c
+    MyCode/System/INT.c
 
-    System/sys.c
-    System/INT.c
-    Hardware/as5047p.c
-    Hardware/SimpleFOC_Learning/current_sense.c
-    Hardware/SimpleFOC_Learning/AS5047P_RW.c
-    Hardware/SimpleFOC_Learning/sensor.c
-    Hardware/SimpleFOC_Learning/driver.c
-    Hardware/SimpleFOC_Learning/PID.c
-    Hardware/SimpleFOC_Learning/platform.c
-    Hardware/SimpleFOC_Learning/BLDCMotor.c
-    Hardware/SimpleFOC_Learning/app_foc.c
-    Hardware/SimpleFOC_Learning/BusVoltage.c
+    MyCode/SimpleFOC_Learning/current_sense.c
+    MyCode/SimpleFOC_Learning/AS5047P_RW.c
+    MyCode/SimpleFOC_Learning/sensor.c
+    MyCode/SimpleFOC_Learning/driver.c
+    MyCode/SimpleFOC_Learning/platform.c
+    MyCode/SimpleFOC_Learning/BLDCMotor.c
+    MyCode/SimpleFOC_Learning/BusVoltage.c
 
-    Hardware/Filter.c
+    MyCode/Application/app_foc.c
+
+    MyCode/Algorithm/PID.c
+    MyCode/Algorithm/Filter.c
+
+    MyCode/IMU/attitude_estimator.c
+    MyCode/IMU/icm42688p.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
-    System
-    Hardware
-    Hardware/SimpleFOC_Learning
+    MyCode
+    MyCode/System
+    MyCode/SimpleFOC_Learning
+    MyCode/Application
+    MyCode/Algorithm
+    MyCode/IMU
 )
 
 # Generate map file

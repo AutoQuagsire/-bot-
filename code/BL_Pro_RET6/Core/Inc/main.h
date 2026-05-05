@@ -87,6 +87,10 @@ void Error_Handler(void);
 #define CurrentR_B_GPIO_Port GPIOB
 #define IMU_SCK_Pin GPIO_PIN_13
 #define IMU_SCK_GPIO_Port GPIOB
+#define IMU_MISO_Pin GPIO_PIN_14
+#define IMU_MISO_GPIO_Port GPIOB
+#define IMU_MOSI_Pin GPIO_PIN_15
+#define IMU_MOSI_GPIO_Port GPIOB
 #define IMU_CS_Pin GPIO_PIN_6
 #define IMU_CS_GPIO_Port GPIOC
 #define IMU_INT_Pin GPIO_PIN_7

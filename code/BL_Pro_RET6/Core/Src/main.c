@@ -28,6 +28,7 @@
 #include "BLDCMotor.h"
 #include "app_foc.h"
 #include "usb_debug.h"
+#include "icm42688p.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,7 +46,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+static uint32_t g_icm_last_print_ms = 0U;
 
 /* USER CODE END PV */
 
@@ -107,31 +108,40 @@ int main(void)
   MX_TIM8_Init();
   MX_SPI1_Init();
   MX_TIM5_Init();
+  MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
 
-  HAL_Delay(500);
-  if (!App_FOCStack_Init()) {
-      Error_Handler();
-  }
-  HAL_Delay(2000);
-  if (!App_StartupCalibrate()) {
-      Error_Handler();
-  }
+  // HAL_Delay(500);
+  // if (!App_FOCStack_Init()) {
+  //     Error_Handler();
+  // }
+  // HAL_Delay(2000);
+  // if (!App_StartupCalibrate()) {
+  //     Error_Handler();
+  // }
 
-  App_FOCControlIT_Enable();
+  // App_FOCControlIT_Enable();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    uint8_t id = ICM_SPI_Test();
+    uint32_t now = HAL_GetTick();
 
-    DebuginWhile();
-    Process_USB_Command();
+    if ((now - g_icm_last_print_ms) >= 200U) {
+      g_icm_last_print_ms = now;
+      USB_Debug_Printf("ICM42688P WHO_AM_I = 0x%02X\r\n", id);
+    }
+
+    //DebuginWhile();
+    //Process_USB_Command();
   }
   /* USER CODE END 3 */
 }
