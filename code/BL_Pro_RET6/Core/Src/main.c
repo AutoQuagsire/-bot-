@@ -110,6 +110,7 @@ int main(void)
   MX_TIM5_Init();
   MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
+  HAL_Delay(10);
 
   // HAL_Delay(500);
   // if (!App_FOCStack_Init()) {
@@ -132,12 +133,14 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    uint8_t id = ICM_SPI_Test();
+    uint8_t who_am_i = ICM_WhoAmI();
     uint32_t now = HAL_GetTick();
 
     if ((now - g_icm_last_print_ms) >= 200U) {
       g_icm_last_print_ms = now;
-      USB_Debug_Printf("ICM42688P WHO_AM_I = 0x%02X\r\n", id);
+      USB_Debug_Printf("ICM42688P WHO_AM_I = 0x%02X (%s)\r\n",
+                       who_am_i,
+                       (who_am_i == ICM42688P_WHO_AM_I_VAL) ? "OK" : "FAIL");
     }
 
     //DebuginWhile();
