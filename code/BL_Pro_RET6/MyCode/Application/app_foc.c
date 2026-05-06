@@ -20,6 +20,55 @@
 #define APP_FOC_HOT
 #endif
 
+
+
+
+static uint8_t App_InitBusVoltage(void);
+static uint8_t App_InitMotor1Stack(void);
+static uint8_t App_InitMotor2Stack(void);
+static uint8_t App_InitFOCAlgorithm(void);
+
+
+
+
+
+/**
+ * @brief FOC 应用层对象初始化
+ *
+ * 职责：
+ * - 初始化 Driver / Encoder / Sensor / CurrentSense；
+ * - 装配 Motor 对象；
+ * - 初始化速度环和电流环 PID；
+ * - 不执行零位电角度校准。
+ */
+uint8_t App_FOCStack_Init(void)
+{
+    if(!App_InitBusVoltage()) {
+        USB_Debug_Printf("Bus voltage init failed\r\n");
+        return 0U;
+    }
+    HAL_Delay(1000);
+    if(!App_InitMotor1Stack()) {
+        USB_Debug_Printf("Motor1 stack init failed\r\n");
+        return 0U;
+    }
+    if(!App_InitMotor2Stack()) {
+        USB_Debug_Printf("Motor2 stack init failed\r\n");
+        return 0U;
+    }
+
+    if (!App_InitFOCAlgorithm()) {
+        USB_Debug_Printf("FOC algorithm init failed\r\n");
+        return 0U;
+    }
+    USB_Debug_Printf("FOC stack init ok\r\n");
+    return 1U;
+}
+
+
+
+
+
 /* 这些外设句柄由 CubeMX 生成并在别处定义
  * 这里用 extern 引用，供应用层初始化时使用 */
 extern SPI_HandleTypeDef hspi3;
@@ -690,241 +739,10 @@ void App_ResetCurrentPIDs(void)
 }
 
 
-/**
- * @brief FOC 应用层对象初始化
- *
- * 职责：
- * - 初始化 Driver / Encoder / Sensor / CurrentSense；
- * - 装配 Motor 对象；
- * - 初始化速度环和电流环 PID；
- * - 不执行零位电角度校准。
- */
-uint8_t App_FOCStack_Init(void)
-{
-#if APP_BUS_VOLTAGE_ENABLE
-    BusVoltage_Setup(&g_bus_voltage, &hadc3);
-    BusVoltage_Enable(&g_bus_voltage);
-    LowPassFilter_Init(&g_bus_voltage_lpf,
-                       APP_BUS_VOLTAGE_LPF_CUTOFF_HZ,
-                       1000.0f / (float)APP_BUS_VOLTAGE_SAMPLE_PERIOD_MS);
-
-    if (!App_BusVoltageStartupSample()) {
-        USB_Debug_Printf("BusVoltage startup sample failed, PWM disabled\r\n");
-        return 0U;
-    }
-
-    USB_Debug_Printf("BusVoltage: ADC,PinV,BusV\r\n");
-    USB_Debug_Printf("%u,%.3f,%.3f\r\n",
-                     (unsigned)g_bus_voltage_debug.raw_adc,
-                     g_bus_voltage_debug.adc_pin_voltage,
-                     g_bus_voltage_debug.bus_voltage);
-#else
-    g_bus_voltage_valid = 1U;
-    g_bus_voltage_debug.raw_adc = 0U;
-    g_bus_voltage_debug.adc_pin_voltage = 0.0f;
-    g_bus_voltage_debug.bus_voltage = V_SUPPLY;
-    g_bus_voltage_filtered = V_SUPPLY;
-    USB_Debug_Printf("BusVoltage disabled, use fixed V_SUPPLY=%.3f\r\n", V_SUPPLY);
-#endif
-    HAL_Delay(1000);
-#if LEFT_MOTOR_ENABLE
-    /* 左电机 Driver 初始化 */
-    g_driver1 = Driver_GetInstance(DRIVER_LEFT);
-    if (g_driver1 == NULL) {
-        USB_Debug_Printf("Driver_GetInstance1 failed\r\n");
-        return 0U;
-    }
-
-    if (!Driver_Init(g_driver1,
-                     &htim1,
-                     TIM_CHANNEL_1,
-                     TIM_CHANNEL_3,
-                     TIM_CHANNEL_4,
-                     19 * 0.577f)) {
-        USB_Debug_Printf("Driver1_Init failed\r\n");
-        return 0U;
-    }
-#if APP_BUS_VOLTAGE_FOC_ENABLE
-    g_driver1->supply_voltage = g_bus_voltage_filtered;
-#else
-    g_driver1->supply_voltage = V_SUPPLY;
-#endif
-
-    /* 左编码器底层驱动 + Sensor 层初始化 */
-    if (!AS5047P_RW_Init(&g_enc1, &hspi3, EcdL_CS_GPIO_Port, EcdL_CS_Pin)) {
-        USB_Debug_Printf("AS5047P_RW_Init1 failed\r\n");
-        return 0U;
-    }
-
-    Sensor_LinkAS5047P(&g_enc1, &g_sensor1);
-    if (!Sensor_Init(&g_sensor1)) {
-        USB_Debug_Printf("Sensor_Init1 failed\r\n");
-        return 0U;
-    }
-
-    /* 左电机电流采样初始化。
-     * CurrentSense_Init 必须放在最前，因为它会清空 CurrentSense 对象。
-     */
-    CurrentSense_Init(&g_current_sense1);
-    CurrentSense_Config(&g_current_sense1, &hadc1, &htim3, TIM_CHANNEL_4);
-    CurrentSenseParam_Init(&g_current_sense1,
-                           FOC_SHUNT_RESISTOR_OHM,
-                           FOC_AMP_GAIN,
-                           1,
-                           1);
-    CurrentSense_CalibrateOffsets(&g_current_sense1);
-
-    /* 装配左 Motor 对象 */
-    linkSensor(&g_sensor1, &g_motor1);
-    linkDriver(g_driver1, &g_motor1);
-    linkCurrentSense(&g_current_sense1, &g_motor1);
-
-    MotorParam_Init(&g_motor1, 14.0f, 10.3f, 0.0f, 0.0f, 0.0f);
-    g_motor1.config.voltage_limit = g_driver1->voltage_limit;
-    g_motor1.config.voltage_sensor_align = g_driver1->voltage_limit;
-    g_motor1.zero_electrical_angle = 0.0f;
-    g_motor1.state.sensor_direction = sensor_direction_cw;
-#endif
 
 
-#if RIGHT_MOTOR_ENABLE
-    /* 右电机 Driver 初始化 */
-    g_driver2 = Driver_GetInstance(DRIVER_RIGHT);
-    if (g_driver2 == NULL) {
-        USB_Debug_Printf("Driver_GetInstance2 failed\r\n");
-        return 0U;
-    }
-
-    if (!Driver_Init(g_driver2,
-                     &htim4,
-                     TIM_CHANNEL_4,
-                     TIM_CHANNEL_3,
-                     TIM_CHANNEL_2,
-                     19 * 0.577f)) {
-        USB_Debug_Printf("Driver2_Init failed\r\n");
-        return 0U;
-    }
-#if APP_BUS_VOLTAGE_FOC_ENABLE
-    g_driver2->supply_voltage = g_bus_voltage_filtered;
-#else
-    g_driver2->supply_voltage = V_SUPPLY;
-#endif
-
-    /* 右编码器底层驱动 + Sensor 层初始化 */
-    if (!AS5047P_RW_Init(&g_enc2, &hspi1, EcdR_CS_GPIO_Port, EcdR_CS_Pin)) {
-        USB_Debug_Printf("AS5047P_RW_Init2 failed\r\n");
-        return 0U;
-    }
-
-    Sensor_LinkAS5047P(&g_enc2, &g_sensor2);
-    if (!Sensor_Init(&g_sensor2)) {
-        USB_Debug_Printf("Sensor_Init2 failed\r\n");
-        return 0U;
-    }
-
-    /* 右电机电流采样初始化 */
-    CurrentSense_Init(&g_current_sense2);
-    CurrentSense_Config(&g_current_sense2, &hadc2, &htim2, TIM_CHANNEL_2);
-    CurrentSenseParam_Init(&g_current_sense2,
-                           FOC_SHUNT_RESISTOR_OHM,
-                           FOC_AMP_GAIN,
-                           1,
-                           1);
-    CurrentSense_CalibrateOffsets(&g_current_sense2);
-
-    /* 装配右 Motor 对象 */
-    linkSensor(&g_sensor2, &g_motor2);
-    linkDriver(g_driver2, &g_motor2);
-    linkCurrentSense(&g_current_sense2, &g_motor2);
-
-    MotorParam_Init(&g_motor2, 14.0f, 10.3f, 0.0f, 0.0f, 0.0f);
-    g_motor2.config.voltage_limit = g_driver2->voltage_limit;
-    g_motor2.config.voltage_sensor_align = g_driver2->voltage_limit;
-    g_motor2.zero_electrical_angle = 0.0f;
-    g_motor2.state.sensor_direction = sensor_direction_cw;
-#endif
 
 
-#if APP_SPEED_LOOP_ENABLE
-    /* 速度环 PID 初始化。当前速度环仍属于 V0.1 验证阶段 */
-    PID_ParameterInitEx(&g_speed_pid1,
-                        APP_SPEED_KP,
-                        APP_SPEED_KI,
-                        APP_SPEED_KD,
-                        APP_SPEED_I_LIMIT,
-                        APP_SPEED_UQ_LIMIT,
-                        APP_SPEED_I_ERR_MIN,
-                        APP_SPEED_I_SEP_RATIO);
-
-    PID_ParameterInitEx(&g_speed_pid2,
-                        APP_SPEED_KP,
-                        APP_SPEED_KI,
-                        APP_SPEED_KD,
-                        APP_SPEED_I_LIMIT,
-                        APP_SPEED_UQ_LIMIT,
-                        APP_SPEED_I_ERR_MIN,
-                        APP_SPEED_I_SEP_RATIO);
-
-    Left_Velocity_FOC_PID = g_speed_pid1;
-    Left_Target = 0.3f;
-    g_speed_fault1 = 0U;
-    g_speed_fault2 = 0U;
-
-    /* 速度反馈低通，当前截止频率 100Hz */
-    LowPassFilter_Init(&g_speed_lpf1, 100.0f, FOC_FREQUENCY);
-    LowPassFilter_Init(&g_speed_lpf2, 100.0f, FOC_FREQUENCY);
-#endif
-
-
-#if APP_CURRENT_LOOP_ENABLE
-    /* 前馈 PI 电流环参数组 */
-    PID_ParameterInitEx(&g_current_pid1,
-                        APP_CURRENT_FF_KP,
-                        APP_CURRENT_FF_KI,
-                        APP_CURRENT_FF_KD,
-                        APP_CURRENT_FF_I_LIMIT,
-                        APP_CURRENT_OUT_LIMIT,
-                        APP_CURRENT_I_ERR_MIN,
-                        CURRENT_LOOP_I_SEP_RATIO);
-
-    PID_ParameterInitEx(&g_current_pid2,
-                        APP_CURRENT_FF_KP,
-                        APP_CURRENT_FF_KI,
-                        APP_CURRENT_FF_KD,
-                        APP_CURRENT_FF_I_LIMIT,
-                        APP_CURRENT_OUT_LIMIT,
-                        APP_CURRENT_I_ERR_MIN,
-                        CURRENT_LOOP_I_SEP_RATIO);
-
-    /* 纯 PI 对照参数组，保留用于实验对比 */
-    PID_ParameterInitEx(&g_current_pid1_Common,
-                        5.3f,
-                        0.62f,
-                        0.0f,
-                        APP_CURRENT_PURE_PI_I_LIMIT,
-                        11.0f,
-                        0.05f,
-                        CURRENT_LOOP_PURE_PI_I_SEP_RATIO);
-
-    PID_ParameterInitEx(&g_current_pid2_Common,
-                        5.3f,
-                        0.62f,
-                        0.0f,
-                        APP_CURRENT_PURE_PI_I_LIMIT,
-                        11.0f,
-                        0.05f,
-                        CURRENT_LOOP_PURE_PI_I_SEP_RATIO);
-
-    /* 电流反馈低通，当前截止频率 800Hz */
-    LowPassFilter_Init(&g_current_lpf1, 800.0f, FOC_FREQUENCY);
-    LowPassFilter_Init(&g_current_lpf2, 800.0f, FOC_FREQUENCY);
-
-    App_ResetCurrentPIDs();
-#endif
-
-    USB_Debug_Printf("FOC stack init ok\r\n");
-    return 1U;
-}
 
 
 /* 上电零位电角度校准。
@@ -1814,3 +1632,255 @@ void DebuginWhile(void)
     g_fastlog_done = 0U;
     __enable_irq();
 }
+
+
+
+
+
+
+
+static uint8_t App_InitBusVoltage(void)
+{
+    #if APP_BUS_VOLTAGE_ENABLE
+        BusVoltage_Setup(&g_bus_voltage, &hadc3);
+        BusVoltage_Enable(&g_bus_voltage);
+        LowPassFilter_Init(&g_bus_voltage_lpf,
+                        APP_BUS_VOLTAGE_LPF_CUTOFF_HZ,
+                        1000.0f / (float)APP_BUS_VOLTAGE_SAMPLE_PERIOD_MS);
+
+        if (!App_BusVoltageStartupSample()) {
+            USB_Debug_Printf("BusVoltage startup sample failed, PWM disabled\r\n");
+            return 0U;
+        }
+
+        USB_Debug_Printf("BusVoltage: ADC,PinV,BusV\r\n");
+        USB_Debug_Printf("%u,%.3f,%.3f\r\n",
+                        (unsigned)g_bus_voltage_debug.raw_adc,
+                        g_bus_voltage_debug.adc_pin_voltage,
+                        g_bus_voltage_debug.bus_voltage);
+    #else
+        g_bus_voltage_valid = 1U;
+        g_bus_voltage_debug.raw_adc = 0U;
+        g_bus_voltage_debug.adc_pin_voltage = 0.0f;
+        g_bus_voltage_debug.bus_voltage = V_SUPPLY;
+        g_bus_voltage_filtered = V_SUPPLY;
+        USB_Debug_Printf("BusVoltage disabled, use fixed V_SUPPLY=%.3f\r\n", V_SUPPLY);
+    #endif
+        return 1U;
+}
+
+
+
+
+
+
+static uint8_t App_InitMotor1Stack(void)
+{
+#if LEFT_MOTOR_ENABLE
+    /* 左电机 Driver 初始化 */
+    g_driver1 = Driver_GetInstance(DRIVER_LEFT);
+    if (g_driver1 == NULL) {
+        USB_Debug_Printf("Driver_GetInstance1 failed\r\n");
+        return 0U;
+    }
+
+    if (!Driver_Init(g_driver1,
+                     &htim1,
+                     TIM_CHANNEL_1,
+                     TIM_CHANNEL_3,
+                     TIM_CHANNEL_4,
+                     19 * 0.577f)) {
+        USB_Debug_Printf("Driver1_Init failed\r\n");
+        return 0U;
+    }
+#if APP_BUS_VOLTAGE_FOC_ENABLE
+    g_driver1->supply_voltage = g_bus_voltage_filtered;
+#else
+    g_driver1->supply_voltage = V_SUPPLY;
+#endif
+
+    /* 左编码器底层驱动 + Sensor 层初始化 */
+    if (!AS5047P_RW_Init(&g_enc1, &hspi3, EcdL_CS_GPIO_Port, EcdL_CS_Pin)) {
+        USB_Debug_Printf("AS5047P_RW_Init1 failed\r\n");
+        return 0U;
+    }
+
+    Sensor_LinkAS5047P(&g_enc1, &g_sensor1);
+    if (!Sensor_Init(&g_sensor1)) {
+        USB_Debug_Printf("Sensor_Init1 failed\r\n");
+        return 0U;
+    }
+
+    /* 左电机电流采样初始化。
+     * CurrentSense_Init 必须放在最前，因为它会清空 CurrentSense 对象。
+     */
+    CurrentSense_Init(&g_current_sense1);
+    CurrentSense_Config(&g_current_sense1, &hadc1, &htim3, TIM_CHANNEL_4);
+    CurrentSenseParam_Init(&g_current_sense1,
+                           FOC_SHUNT_RESISTOR_OHM,
+                           FOC_AMP_GAIN,
+                           1,
+                           1);
+    CurrentSense_CalibrateOffsets(&g_current_sense1);
+
+    /* 装配左 Motor 对象 */
+    linkSensor(&g_sensor1, &g_motor1);
+    linkDriver(g_driver1, &g_motor1);
+    linkCurrentSense(&g_current_sense1, &g_motor1);
+
+    MotorParam_Init(&g_motor1, 14.0f, 10.3f, 0.0f, 0.0f, 0.0f);
+    g_motor1.config.voltage_limit = g_driver1->voltage_limit;
+    g_motor1.config.voltage_sensor_align = g_driver1->voltage_limit;
+    g_motor1.zero_electrical_angle = 0.0f;
+    g_motor1.state.sensor_direction = sensor_direction_cw;
+#endif
+    return 1U;
+}
+
+
+
+
+
+static uint8_t App_InitMotor2Stack(void)
+{
+#if RIGHT_MOTOR_ENABLE
+    /* 右电机 Driver 初始化 */
+    g_driver2 = Driver_GetInstance(DRIVER_RIGHT);
+    if (g_driver2 == NULL) {
+        USB_Debug_Printf("Driver_GetInstance2 failed\r\n");
+        return 0U;
+    }
+
+    if (!Driver_Init(g_driver2,
+                     &htim4,
+                     TIM_CHANNEL_4,
+                     TIM_CHANNEL_3,
+                     TIM_CHANNEL_2,
+                     19 * 0.577f)) {
+        USB_Debug_Printf("Driver2_Init failed\r\n");
+        return 0U;
+    }
+#if APP_BUS_VOLTAGE_FOC_ENABLE
+    g_driver2->supply_voltage = g_bus_voltage_filtered;
+#else
+    g_driver2->supply_voltage = V_SUPPLY;
+#endif
+
+    /* 右编码器底层驱动 + Sensor 层初始化 */
+    if (!AS5047P_RW_Init(&g_enc2, &hspi1, EcdR_CS_GPIO_Port, EcdR_CS_Pin)) {
+        USB_Debug_Printf("AS5047P_RW_Init2 failed\r\n");
+        return 0U;
+    }
+
+    Sensor_LinkAS5047P(&g_enc2, &g_sensor2);
+    if (!Sensor_Init(&g_sensor2)) {
+        USB_Debug_Printf("Sensor_Init2 failed\r\n");
+        return 0U;
+    }
+
+    /* 右电机电流采样初始化 */
+    CurrentSense_Init(&g_current_sense2);
+    CurrentSense_Config(&g_current_sense2, &hadc2, &htim2, TIM_CHANNEL_2);
+    CurrentSenseParam_Init(&g_current_sense2,
+                           FOC_SHUNT_RESISTOR_OHM,
+                           FOC_AMP_GAIN,
+                           1,
+                           1);
+    CurrentSense_CalibrateOffsets(&g_current_sense2);
+
+    /* 装配右 Motor 对象 */
+    linkSensor(&g_sensor2, &g_motor2);
+    linkDriver(g_driver2, &g_motor2);
+    linkCurrentSense(&g_current_sense2, &g_motor2);
+
+    MotorParam_Init(&g_motor2, 14.0f, 10.3f, 0.0f, 0.0f, 0.0f);
+    g_motor2.config.voltage_limit = g_driver2->voltage_limit;
+    g_motor2.config.voltage_sensor_align = g_driver2->voltage_limit;
+    g_motor2.zero_electrical_angle = 0.0f;
+    g_motor2.state.sensor_direction = sensor_direction_cw;
+#endif
+    return 1U;
+}
+
+
+static uint8_t App_InitFOCAlgorithm(void)
+{
+    #if APP_SPEED_LOOP_ENABLE
+        /* 速度环 PID 初始化。当前速度环仍属于 V0.1 验证阶段 */
+        PID_ParameterInitEx(&g_speed_pid1,
+                            APP_SPEED_KP,
+                            APP_SPEED_KI,
+                            APP_SPEED_KD,
+                            APP_SPEED_I_LIMIT,
+                            APP_SPEED_UQ_LIMIT,
+                            APP_SPEED_I_ERR_MIN,
+                            APP_SPEED_I_SEP_RATIO);
+
+        PID_ParameterInitEx(&g_speed_pid2,
+                            APP_SPEED_KP,
+                            APP_SPEED_KI,
+                            APP_SPEED_KD,
+                            APP_SPEED_I_LIMIT,
+                            APP_SPEED_UQ_LIMIT,
+                            APP_SPEED_I_ERR_MIN,
+                            APP_SPEED_I_SEP_RATIO);
+
+        Left_Velocity_FOC_PID = g_speed_pid1;
+        Left_Target = 0.3f;
+        g_speed_fault1 = 0U;
+        g_speed_fault2 = 0U;
+
+        /* 速度反馈低通，当前截止频率 100Hz */
+        LowPassFilter_Init(&g_speed_lpf1, 100.0f, FOC_FREQUENCY);
+        LowPassFilter_Init(&g_speed_lpf2, 100.0f, FOC_FREQUENCY);
+    #endif
+
+
+    #if APP_CURRENT_LOOP_ENABLE
+        /* 前馈 PI 电流环参数组 */
+        PID_ParameterInitEx(&g_current_pid1,
+                            APP_CURRENT_FF_KP,
+                            APP_CURRENT_FF_KI,
+                            APP_CURRENT_FF_KD,
+                            APP_CURRENT_FF_I_LIMIT,
+                            APP_CURRENT_OUT_LIMIT,
+                            APP_CURRENT_I_ERR_MIN,
+                            CURRENT_LOOP_I_SEP_RATIO);
+
+        PID_ParameterInitEx(&g_current_pid2,
+                            APP_CURRENT_FF_KP,
+                            APP_CURRENT_FF_KI,
+                            APP_CURRENT_FF_KD,
+                            APP_CURRENT_FF_I_LIMIT,
+                            APP_CURRENT_OUT_LIMIT,
+                            APP_CURRENT_I_ERR_MIN,
+                            CURRENT_LOOP_I_SEP_RATIO);
+
+        /* 纯 PI 对照参数组，保留用于实验对比 */
+        PID_ParameterInitEx(&g_current_pid1_Common,
+                            5.3f,
+                            0.62f,
+                            0.0f,
+                            APP_CURRENT_PURE_PI_I_LIMIT,
+                            11.0f,
+                            0.05f,
+                            CURRENT_LOOP_PURE_PI_I_SEP_RATIO);
+
+        PID_ParameterInitEx(&g_current_pid2_Common,
+                            5.3f,
+                            0.62f,
+                            0.0f,
+                            APP_CURRENT_PURE_PI_I_LIMIT,
+                            11.0f,
+                            0.05f,
+                            CURRENT_LOOP_PURE_PI_I_SEP_RATIO);
+
+        /* 电流反馈低通，当前截止频率 800Hz */
+        LowPassFilter_Init(&g_current_lpf1, 800.0f, FOC_FREQUENCY);
+        LowPassFilter_Init(&g_current_lpf2, 800.0f, FOC_FREQUENCY);
+
+        App_ResetCurrentPIDs();
+    #endif
+        return 1U;
+}
+

@@ -128,8 +128,9 @@ void Sensor_Update(Sensor_t *sensor, float dt)
 {
     if (!sensor || !sensor->initialized || !sensor->dev) return;
     if (dt <= 0.0f) return;
-    if (sensor->type != SENSOR_AS5047P) return;
-
+    switch (sensor->type) {
+    case SENSOR_AS5047P:
+    {
     AS5047P_Handle_t *dev = (AS5047P_Handle_t *)sensor->dev;
 
     /* AS5047P_ReadRawAngle() 会同步更新 dev->raw_angle 和 dev->angle_rad */
@@ -208,6 +209,13 @@ void Sensor_Update(Sensor_t *sensor, float dt)
         (sensor->angle_track - theta_old) * (INV_VEL_WIN_NUMBER * inv_dt);
 
     sensor->last_angle = angle_now;
+    return;
+    }
+
+    case SENSOR_AS5600:
+    default:
+        return;
+    }
 }
 
 
