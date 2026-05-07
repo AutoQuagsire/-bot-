@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "spi.h"
+#include "imu_types.h"
 
 
 #define ICM42688_OK                 1u
@@ -17,6 +18,7 @@
 
 #define ICM42688_REG_DEVICE_CONFIG  0x11u
 #define ICM42688_REG_DRIVE_CONFIG   0x13u
+#define ICM42688_REG_INT_CONFIG     0x14u
 #define ICM42688_REG_FIFO_CONFIG    0x16u
 #define ICM42688_REG_ACCEL_DATA_X1  0x1Fu
 #define ICM42688_REG_INT_STATUS     0x2Du
@@ -25,6 +27,8 @@
 #define ICM42688_REG_GYRO_CONFIG0   0x4Fu
 #define ICM42688_REG_ACCEL_CONFIG0  0x50u
 #define ICM42688_REG_GYRO_ACCEL_CONFIG0 0x52u
+#define ICM42688_REG_INT_CONFIG1    0x64u
+#define ICM42688_REG_INT_SOURCE0    0x65u
 #define ICM42688_REG_WHO_AM_I       0x75u
 #define ICM42688_REG_BANK_SEL       0x76u
 
@@ -60,12 +64,7 @@ uint8_t ICM42688_Init(ICM42688_Handle_t *dev,
                      GPIO_TypeDef *cs_port,
                      uint16_t cs_pin);
 
-/*
- * raw layout:
- * raw[0..2] = accel x/y/z
- * raw[3..5] = gyro  x/y/z
- */
-uint8_t ICM42688_ReadRawData(ICM42688_Handle_t *dev, int16_t *raw);
+uint8_t ICM42688_ReadRawData(ICM42688_Handle_t *dev, IMU_RawData_t *raw);
 
 
 

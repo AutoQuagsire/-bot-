@@ -95,6 +95,7 @@ void Error_Handler(void);
 #define IMU_CS_GPIO_Port GPIOC
 #define IMU_INT_Pin GPIO_PIN_7
 #define IMU_INT_GPIO_Port GPIOC
+#define IMU_INT_EXTI_IRQn EXTI9_5_IRQn
 #define LED_Pin GPIO_PIN_8
 #define LED_GPIO_Port GPIOA
 #define EcdL_SCK_Pin GPIO_PIN_10

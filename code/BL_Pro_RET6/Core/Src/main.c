@@ -10,6 +10,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "INT.h"
 #include "adc.h"
 #include "dma.h"
 #include "spi.h"
@@ -27,9 +28,10 @@
 #include "sensor.h"
 #include "BLDCMotor.h"
 #include "app_foc.h"
+#include "app_attitude.h"
 #include "usb_debug.h"
 #include "icm42688p.h"
-#include "attitude_estimator.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -113,7 +115,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_Delay(2000);
 
-  App_Estimator_Init();
+  App_Attitude_Init();
 
   // HAL_Delay(500);
   // if (!App_FOCStack_Init()) {
@@ -136,7 +138,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
+  App_Attitude_Loop();
 
     //DebuginWhile();
     //Process_USB_Command();

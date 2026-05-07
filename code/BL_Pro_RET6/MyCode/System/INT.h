@@ -10,6 +10,7 @@ extern float left_filtered_velocity;
 extern float right_raw_velocity;
 extern float right_filtered_velocity;
 extern volatile uint8_t FOC_Task;
+extern volatile uint8_t IMU_DRDY_Flag;
 
 
 extern uint8_t Test_flag ;

@@ -203,6 +203,24 @@ uint8_t ICM42688_Init(ICM42688_Handle_t *dev,
     }
 
     /*
+     * Configure DRDY interrupt on INT1:
+     * INT1 active-high, push-pull, pulsed mode.
+     * INT_CONFIG1 bit4(INT_ASYNC_RESET) must be 0 for proper INT pin operation.
+     * Route UI_DRDY interrupt to INT1 only.
+     */
+    if (ICM42688_WriteReg(dev, ICM42688_REG_INT_CONFIG, 0x03) != ICM42688_OK) {
+        return ICM42688_ERR;
+    }
+
+    if (ICM42688_WriteReg(dev, ICM42688_REG_INT_CONFIG1, 0x00) != ICM42688_OK) {
+        return ICM42688_ERR;
+    }
+
+    if (ICM42688_WriteReg(dev, ICM42688_REG_INT_SOURCE0, 0x08) != ICM42688_OK) {
+        return ICM42688_ERR;
+    }
+
+    /*
      * PWR_MGMT0:
      * bit3:2 = 11 -> Gyro Low Noise Mode
      * bit1:0 = 11 -> Accel Low Noise Mode
@@ -236,7 +254,7 @@ uint8_t ICM42688_Init(ICM42688_Handle_t *dev,
     return ICM42688_OK;
 }
 
-uint8_t ICM42688_ReadRawData(ICM42688_Handle_t *dev, int16_t *raw)
+uint8_t ICM42688_ReadRawData(ICM42688_Handle_t *dev, IMU_RawData_t *raw)
 {
     uint8_t frame[12];
 
@@ -268,13 +286,13 @@ uint8_t ICM42688_ReadRawData(ICM42688_Handle_t *dev, int16_t *raw)
     dev->gyro_raw[2]  = (int16_t)(((uint16_t)frame[10] << 8) | frame[11]);
 
     if (raw != NULL) {
-        raw[0] = dev->accel_raw[0];
-        raw[1] = dev->accel_raw[1];
-        raw[2] = dev->accel_raw[2];
+        raw->accel[0] = dev->accel_raw[0];
+        raw->accel[1] = dev->accel_raw[1];
+        raw->accel[2] = dev->accel_raw[2];
 
-        raw[3] = dev->gyro_raw[0];
-        raw[4] = dev->gyro_raw[1];
-        raw[5] = dev->gyro_raw[2];
+        raw->gyro[0] = dev->gyro_raw[0];
+        raw->gyro[1] = dev->gyro_raw[1];
+        raw->gyro[2] = dev->gyro_raw[2];
     }
 
     return ICM42688_OK;

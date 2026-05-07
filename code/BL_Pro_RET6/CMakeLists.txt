@@ -59,7 +59,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     MyCode/SimpleFOC_Learning/BusVoltage.c
 
     MyCode/Application/app_foc.c
-
+    MyCode/Application/app_attitude.c
     MyCode/Algorithm/PID.c
     MyCode/Algorithm/Filter.c
 
