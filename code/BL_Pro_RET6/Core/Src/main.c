@@ -10,7 +10,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "INT.h"
 #include "adc.h"
 #include "dma.h"
 #include "spi.h"
@@ -138,7 +137,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  App_Attitude_Loop();
+    App_Attitude_Loop();
 
     //DebuginWhile();
     //Process_USB_Command();
