@@ -37,14 +37,29 @@ static void App_Attitude_ConvertToPhysical(const IMU_RawData_t *raw_data, IMU_Ph
     if (raw_data == NULL || phys_data == NULL) {
         return;
     }
+    int16_t ax_frd_raw, ay_frd_raw, az_frd_raw;
+    int16_t gx_frd_raw, gy_frd_raw, gz_frd_raw;
 
-    phys_data->ax_mps2 = (float)raw_data->accel[0] * APP_ACCEL_LSB_TO_MPS2;
-    phys_data->ay_mps2 = (float)raw_data->accel[1] * APP_ACCEL_LSB_TO_MPS2;
-    phys_data->az_mps2 = (float)raw_data->accel[2] * APP_ACCEL_LSB_TO_MPS2;
 
-    phys_data->gx_radps = (float)raw_data->gyro[0] * APP_GYRO_LSB_TO_RADPS;
-    phys_data->gy_radps = (float)raw_data->gyro[1] * APP_GYRO_LSB_TO_RADPS;
-    phys_data->gz_radps = (float)raw_data->gyro[2] * APP_GYRO_LSB_TO_RADPS;
+    // accel
+    ax_frd_raw = -raw_data->accel[1]; // 前 = -ay
+    ay_frd_raw =  raw_data->accel[0]; // 右 = +ax
+    az_frd_raw = -raw_data->accel[2]; // 下 = -az
+
+    // gyro
+    gx_frd_raw = -raw_data->gyro[1];  // 右倾为正(roll+)
+    gy_frd_raw =  raw_data->gyro[0];  // 前倾为正(pitch+)
+    gz_frd_raw = -raw_data->gyro[2];  // 右转为正(yaw+)
+
+
+    phys_data->ax_mps2 = (float)ax_frd_raw * APP_ACCEL_LSB_TO_MPS2;
+    phys_data->ay_mps2 = (float)ay_frd_raw * APP_ACCEL_LSB_TO_MPS2;
+    phys_data->az_mps2 = (float)az_frd_raw * APP_ACCEL_LSB_TO_MPS2;
+
+    phys_data->gx_radps = (float)gx_frd_raw * APP_GYRO_LSB_TO_RADPS;
+    phys_data->gy_radps = (float)gy_frd_raw * APP_GYRO_LSB_TO_RADPS;
+    phys_data->gz_radps = (float)gz_frd_raw * APP_GYRO_LSB_TO_RADPS;
+
 }
 
 

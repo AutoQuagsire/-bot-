@@ -19,6 +19,7 @@ void PID_Reset(PID_t *pid)
 
     pid->error_integral = 0.0f;
     pid->last_error = 0.0f;
+    pid->last_last_error = 0.0f;
     pid->output = 0.0f;
 }
 
@@ -281,6 +282,42 @@ void PID_CalculateTest(PID_t *pid, float target, float measure)
     pid->output = (pid->Kp * error) +
                   (pid->Ki * pid->error_integral) +
                   (pid->Kd * derivative);
+}
+
+
+/* 增量式 PID 测试版。
+ *
+ * 与 PID_CalculateTest（位置式）对照用，不接入程序。
+ *
+ * 位置式：u[k] = Kp*e[k] + Ki*Σe + Kd*(e[k]-e[k-1])
+ * 增量式：Δu = Kp*(e[k]-e[k-1]) + Ki*e[k] + Kd*(e[k]-2*e[k-1]+e[k-2])
+ *         u[k] = u[k-1] + Δu
+ *
+ * 增量式特点：
+ * - 输出增量只与最近三次误差有关，无需累加历史全部误差；
+ * - 无积分饱和问题（自然截断）；
+ * - 手动切换无扰动更容易（只需设 Δu=0）。
+ */
+void PID_CalculateIncrementalTest(PID_t *pid, float target, float measure)
+{
+    float error = target - measure;
+    float delta_u;
+
+    delta_u = pid->Kp * (error - pid->last_error)
+            + pid->Ki * error
+            + pid->Kd * (error - 2.0f * pid->last_error + pid->last_last_error);
+
+    pid->output += delta_u;
+
+    /* 总输出限幅（增量式本身无积分饱和，但仍需限幅保护执行器） */
+    if (pid->output > pid->output_limit) {
+        pid->output = pid->output_limit;
+    } else if (pid->output < -pid->output_limit) {
+        pid->output = -pid->output_limit;
+    }
+
+    pid->last_last_error = pid->last_error;
+    pid->last_error = error;
 }
 
 
