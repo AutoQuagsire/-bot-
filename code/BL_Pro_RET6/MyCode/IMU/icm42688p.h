@@ -38,6 +38,8 @@
 #define ICM42688_GRAVITY            9.80665f
 #define ICM42688_DEG_TO_RAD         0.017453292519943295f
 #define ICM42688_RAW_DATA_WORDS     6u
+#define ICM42688_BURST_DATA_BYTES   12u
+#define ICM42688_BURST_XFER_BYTES   (1u + ICM42688_BURST_DATA_BYTES)
 
 
 
@@ -53,6 +55,10 @@ typedef struct
     int16_t gyro_raw[3];
     int16_t accel_raw[3];
 
+    uint8_t dma_tx[ICM42688_BURST_XFER_BYTES];
+    uint8_t dma_rx[ICM42688_BURST_XFER_BYTES];
+    volatile uint8_t dma_busy;
+
 } ICM42688_Handle_t;
 
 
@@ -65,6 +71,10 @@ uint8_t ICM42688_Init(ICM42688_Handle_t *dev,
                      uint16_t cs_pin);
 
 uint8_t ICM42688_ReadRawData(ICM42688_Handle_t *dev, IMU_RawData_t *raw);
+void ICM42688_ConvertRawToPhysical(const IMU_RawData_t *raw, IMU_PhysData_t *phys);
+uint8_t ICM42688_StartReadRawDataDMA(ICM42688_Handle_t *dev);
+uint8_t ICM42688_OnSpiTxRxCpltISR(ICM42688_Handle_t *dev, IMU_RawData_t *raw);
+void ICM42688_OnSpiErrorISR(ICM42688_Handle_t *dev);
 
 
 

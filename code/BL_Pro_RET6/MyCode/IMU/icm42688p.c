@@ -4,12 +4,6 @@
 
 /* ICM42688P register addresses (top bit = R/W: 0=write, 1=read) */
 
-/* CS pin: PC6 */
-static uint8_t tx_buf[2];
-static uint8_t rx_buf[2];
-
-
-
 static void ICM42688_CS_Low(ICM42688_Handle_t *dev)
 {
     HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
@@ -86,6 +80,21 @@ static uint8_t ICM42688_SelectBank(ICM42688_Handle_t *dev, uint8_t bank)
     return ICM42688_WriteReg(dev, ICM42688_REG_BANK_SEL, bank & 0x07u);
 }
 
+static void ICM42688_ParseRawFrame(const uint8_t *frame, IMU_RawData_t *raw)
+{
+    if (frame == NULL || raw == NULL) {
+        return;
+    }
+
+    raw->accel[0] = (int16_t)(((uint16_t)frame[0]  << 8) | frame[1]);
+    raw->accel[1] = (int16_t)(((uint16_t)frame[2]  << 8) | frame[3]);
+    raw->accel[2] = (int16_t)(((uint16_t)frame[4]  << 8) | frame[5]);
+
+    raw->gyro[0]  = (int16_t)(((uint16_t)frame[6]  << 8) | frame[7]);
+    raw->gyro[1]  = (int16_t)(((uint16_t)frame[8]  << 8) | frame[9]);
+    raw->gyro[2]  = (int16_t)(((uint16_t)frame[10] << 8) | frame[11]);
+}
+
 uint8_t ICM42688_Init(ICM42688_Handle_t *dev,
                       SPI_HandleTypeDef *hspi,
                       GPIO_TypeDef *cs_port,
@@ -105,6 +114,10 @@ uint8_t ICM42688_Init(ICM42688_Handle_t *dev,
     dev->cs_pin = cs_pin;
     dev->module_id = IMU_MODULE_ID_ICM42688;
     dev->initialized = 0;
+    dev->dma_busy = 0U;
+    memset(dev->dma_tx, 0, sizeof(dev->dma_tx));
+    memset(dev->dma_rx, 0, sizeof(dev->dma_rx));
+    dev->dma_tx[0] = ICM42688_REG_ACCEL_DATA_X1 | ICM42688_READ_FLAG;
 
     /*
      * 先让 CS 空闲为高。
@@ -296,4 +309,81 @@ uint8_t ICM42688_ReadRawData(ICM42688_Handle_t *dev, IMU_RawData_t *raw)
     }
 
     return ICM42688_OK;
+}
+
+void ICM42688_ConvertRawToPhysical(const IMU_RawData_t *raw, IMU_PhysData_t *phys)
+{
+    const float accel_lsb_to_mps2 = ICM42688_GRAVITY / 8192.0f;     /* +/-4g */
+    const float gyro_lsb_to_radps = ICM42688_DEG_TO_RAD / 32.8f;    /* +/-1000dps */
+
+    if (raw == NULL || phys == NULL) {
+        return;
+    }
+
+    phys->ax_mps2 = (float)raw->accel[0] * accel_lsb_to_mps2;
+    phys->ay_mps2 = (float)raw->accel[1] * accel_lsb_to_mps2;
+    phys->az_mps2 = (float)raw->accel[2] * accel_lsb_to_mps2;
+
+    phys->gx_radps = (float)raw->gyro[0] * gyro_lsb_to_radps;
+    phys->gy_radps = (float)raw->gyro[1] * gyro_lsb_to_radps;
+    phys->gz_radps = (float)raw->gyro[2] * gyro_lsb_to_radps;
+}
+
+uint8_t ICM42688_StartReadRawDataDMA(ICM42688_Handle_t *dev)
+{
+    if (dev == NULL || dev->initialized == 0U || dev->hspi == NULL) {
+        return ICM42688_ERR;
+    }
+
+    if (dev->dma_busy != 0U) {
+        return ICM42688_ERR;
+    }
+
+    dev->dma_busy = 1U;
+    ICM42688_CS_Low(dev);
+
+    if (HAL_SPI_TransmitReceive_DMA(dev->hspi,
+                                    dev->dma_tx,
+                                    dev->dma_rx,
+                                    ICM42688_BURST_XFER_BYTES) != HAL_OK) {
+        ICM42688_CS_High(dev);
+        dev->dma_busy = 0U;
+        return ICM42688_ERR;
+    }
+
+    return ICM42688_OK;
+}
+
+uint8_t ICM42688_OnSpiTxRxCpltISR(ICM42688_Handle_t *dev, IMU_RawData_t *raw)
+{
+    if (dev == NULL) {
+        return ICM42688_ERR;
+    }
+
+    ICM42688_CS_High(dev);
+    dev->dma_busy = 0U;
+
+    if (raw == NULL) {
+        return ICM42688_ERR;
+    }
+
+    ICM42688_ParseRawFrame(&dev->dma_rx[1], raw);
+    dev->accel_raw[0] = raw->accel[0];
+    dev->accel_raw[1] = raw->accel[1];
+    dev->accel_raw[2] = raw->accel[2];
+    dev->gyro_raw[0] = raw->gyro[0];
+    dev->gyro_raw[1] = raw->gyro[1];
+    dev->gyro_raw[2] = raw->gyro[2];
+
+    return ICM42688_OK;
+}
+
+void ICM42688_OnSpiErrorISR(ICM42688_Handle_t *dev)
+{
+    if (dev == NULL) {
+        return;
+    }
+
+    ICM42688_CS_High(dev);
+    dev->dma_busy = 0U;
 }

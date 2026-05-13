@@ -62,6 +62,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     MyCode/Application/app_attitude.c
     MyCode/Algorithm/PID.c
     MyCode/Algorithm/Filter.c
+    MyCode/Algorithm/kalman_1d.c
 
     MyCode/IMU/attitude_estimator.c
     MyCode/IMU/icm42688p.c
