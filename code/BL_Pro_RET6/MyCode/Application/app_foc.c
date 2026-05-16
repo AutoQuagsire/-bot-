@@ -1463,6 +1463,7 @@ static volatile uint8_t  g_fastlog_done  = 0U;
 static volatile uint32_t g_fastlog_capture_id = 0U;
 static volatile uint8_t  g_fastlog_blocked = 0U;
 static volatile uint8_t  g_fastlog_source = FASTLOG_SOURCE_LEFT;
+static volatile uint8_t  g_fastlog_capture_source = FASTLOG_SOURCE_LEFT;
 
 
 /* FastLog 上膛。
@@ -1483,6 +1484,7 @@ static uint8_t app_fastlog_try_arm_internal(uint8_t force_rearm)
         g_fastlog_done = 0U;
         g_fastlog_capture_id++;
         g_fastlog_blocked = 0U;
+        g_fastlog_capture_source = g_fastlog_source;
     } else {
         g_fastlog_blocked = 1U;
     }
@@ -1506,6 +1508,9 @@ void App_StopFastLog(void)
 {
     __disable_irq();
     g_fastlog_armed = 0U;
+    g_fastlog_done = 0U;
+    g_fastlog_blocked = 0U;
+    g_fastlog_count = 0U;
     __enable_irq();
 }
 
@@ -1545,7 +1550,7 @@ void App_GetFastLogStatus(uint16_t *count,
     local_done = g_fastlog_done;
     local_capture_id = g_fastlog_capture_id;
     local_blocked = g_fastlog_blocked;
-    local_source  = g_fastlog_source;
+    local_source  = g_fastlog_capture_source;
     __enable_irq();
 
     if (count != NULL) {
@@ -1874,7 +1879,7 @@ void DebuginWhile(void)
     __disable_irq();
     sample_count = g_fastlog_count;
     capture_id   = g_fastlog_capture_id;
-    source       = g_fastlog_source;
+    source       = g_fastlog_capture_source;
     __enable_irq();
 
     USB_Debug_Printf("[FASTLOG] capture=%lu motor=%c samples=%u format=target_iq,iq_ref,filtered_iq,raw_iq,pi_out,ff_term,uq_final,ff_coef,integral_limit,pid_integral,shaft_angle,shaft_velocity,electrical_angle,bus_raw_adc,bus_pin_voltage,bus_voltage\r\n",

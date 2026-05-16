@@ -1,0 +1,570 @@
+"""
+DebugLink serial transport — reusable by CLI, GUI, and scripts.
+
+All wire-format parsing delegates to debuglink_parser.
+Thread-safe for concurrent stream reading + command/response operations.
+
+Usage::
+
+    t = DebugLinkTransport()
+    t.connect("COM33")
+    print(t.ping())
+    print(t.get_info())
+    t.stream_start(rate_hz=100)
+    # ... read frames via callback ...
+    t.stream_stop()
+    t.disconnect()
+"""
+
+import struct
+import threading
+import time
+
+import serial
+
+from debuglink_models import FastCapMeta, FastCapSample, LiveFrame
+from debuglink_parser import (
+    parse_fastcap_chunk,
+    parse_fastcap_status,
+    parse_status_stream,
+)
+
+# ---------------------------------------------------------------------------
+# Protocol constants  (mirror debug_link_protocol.h / debuglink_cli.py)
+# ---------------------------------------------------------------------------
+
+SOF0 = 0x5A
+SOF1 = 0xA5
+VERSION = 0x01
+MAX_PAYLOAD = 240
+
+MSG_PING_REQ = 0x01
+MSG_GET_DEVICE_INFO_REQ = 0x02
+MSG_STREAM_CONTROL_REQ = 0x10
+MSG_FAST_CAPTURE_REQ = 0x14
+MSG_POWER_STAGE_REQ = 0x15
+MSG_ATTITUDE_CONTROL_REQ = 0x16
+MSG_ACK = 0x80
+MSG_NACK = 0x81
+MSG_DEVICE_INFO_RSP = 0x82
+MSG_STATUS_STREAM = 0x90
+MSG_FAST_CAPTURE_DATA = 0x91
+
+OP_FASTCAP_ARM = 0x01
+OP_FASTCAP_STATUS = 0x02
+OP_FASTCAP_READ_CHUNK = 0x03
+OP_FASTCAP_STOP = 0x04
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class TransportError(Exception):
+    """Fatal transport error (disconnected, serial failure, protocol violation)."""
+
+
+class TransportTimeout(TransportError):
+    """Request timed out after all retries."""
+
+
+# ---------------------------------------------------------------------------
+# Internal frame reader  (stateless between frames, not thread-safe)
+# ---------------------------------------------------------------------------
+
+
+class _FrameReader:
+    """SOF-synchronised frame parser — identical algorithm to debuglink_cli."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._state = 0
+        self._header = bytearray()
+        self._payload = bytearray()
+        self._expected_len = 0
+        self._crc_bytes = bytearray()
+
+    @staticmethod
+    def _crc16(data: bytes) -> int:
+        crc = 0xFFFF
+        for byte in data:
+            crc ^= byte << 8
+            for _ in range(8):
+                if crc & 0x8000:
+                    crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+                else:
+                    crc = (crc << 1) & 0xFFFF
+        return crc
+
+    def feed(self, byte: int):
+        """Feed one byte.  Returns (msg_type, seq, payload) or None."""
+        if self._state == 0:
+            if byte == SOF0:
+                self._state = 1
+            return None
+
+        if self._state == 1:
+            if byte == SOF1:
+                self._state = 2
+                self._header = bytearray()
+            else:
+                self.reset()
+            return None
+
+        if self._state == 2:
+            self._header.append(byte)
+            if len(self._header) == 5:
+                self._expected_len = struct.unpack_from("<H", self._header, 3)[0]
+                if self._expected_len > MAX_PAYLOAD:
+                    self.reset()
+                    return None
+                if self._expected_len == 0:
+                    self._state = 4
+                    self._crc_bytes = bytearray()
+                else:
+                    self._state = 3
+                    self._payload = bytearray()
+            return None
+
+        if self._state == 3:
+            self._payload.append(byte)
+            if len(self._payload) >= self._expected_len:
+                self._state = 4
+                self._crc_bytes = bytearray()
+            return None
+
+        if self._state == 4:
+            self._crc_bytes.append(byte)
+            if len(self._crc_bytes) == 2:
+                self._state = 0
+                return self._check_frame()
+            return None
+
+        return None
+
+    def _check_frame(self):
+        body = bytes(self._header) + bytes(self._payload)
+        crc_calc = self._crc16(body)
+        crc_recv = struct.unpack_from("<H", self._crc_bytes)[0]
+        if crc_calc != crc_recv:
+            return None
+        msg_type = self._header[1]
+        seq = self._header[2]
+        return (msg_type, seq, bytes(self._payload))
+
+
+# ---------------------------------------------------------------------------
+# DebugLinkTransport
+# ---------------------------------------------------------------------------
+
+
+class DebugLinkTransport:
+    """Serial transport that delegates all payload parsing to debuglink_parser.
+
+    Thread safety: a single ``_serial_lock`` mutualises all serial I/O.
+    The stream background thread acquires it for each read cycle; request/
+    response methods acquire it for the duration of send + receive.
+    """
+
+    def __init__(self):
+        self._ser: serial.Serial | None = None
+        self._cmd_reader = _FrameReader()
+        self._stream_reader = _FrameReader()
+        self._serial_lock = threading.Lock()
+        self._seq = 0
+
+        # stream state
+        self._stream_thread: threading.Thread | None = None
+        self._stream_stop_event = threading.Event()
+        self._stream_callback = None  # callable(LiveFrame) | None
+        self._stream_rate_hz: int | None = None
+
+    # ------------------------------------------------------------------
+    # Connection
+    # ------------------------------------------------------------------
+
+    @property
+    def is_connected(self) -> bool:
+        return self._ser is not None and self._ser.is_open
+
+    def connect(self, port: str, baud: int = 921600) -> None:
+        """Open *port* and prepare the link.
+
+        Raises :exc:`TransportError` when the port cannot be opened.
+        """
+        if self.is_connected:
+            self.disconnect()
+
+        try:
+            self._ser = serial.Serial(
+                port=port,
+                baudrate=baud,
+                timeout=0.05,
+                write_timeout=1.0,
+            )
+        except (serial.SerialException, OSError) as e:
+            raise TransportError(f"cannot open {port}: {e}") from e
+
+        try:
+            self._ser.dtr = False
+            self._ser.rts = False
+        except Exception:
+            pass
+
+        time.sleep(0.08)
+        try:
+            self._ser.reset_input_buffer()
+            self._ser.reset_output_buffer()
+        except Exception:
+            pass
+
+        self._cmd_reader.reset()
+        self._stream_reader.reset()
+        self._seq = 0
+
+    def disconnect(self) -> None:
+        """Stop streaming, close the serial port, and release resources."""
+        self.stream_stop()
+        if self._ser is not None:
+            try:
+                self._ser.close()
+            except Exception:
+                pass
+            self._ser = None
+
+    def _check_connected(self):
+        if not self.is_connected:
+            raise TransportError("not connected — call connect() first")
+
+    # ------------------------------------------------------------------
+    # Low-level I/O  (caller must hold _serial_lock for _recv)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _crc16(data: bytes) -> int:
+        crc = 0xFFFF
+        for byte in data:
+            crc ^= byte << 8
+            for _ in range(8):
+                if crc & 0x8000:
+                    crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+                else:
+                    crc = (crc << 1) & 0xFFFF
+        return crc
+
+    def _next_seq(self) -> int:
+        self._seq = (self._seq + 1) & 0xFF
+        return self._seq
+
+    def _build_frame(self, msg_type: int, seq: int, payload: bytes) -> bytes:
+        header = bytes([VERSION, msg_type, seq]) + struct.pack("<H", len(payload))
+        body = header + payload
+        crc = self._crc16(body)
+        return bytes([SOF0, SOF1]) + body + struct.pack("<H", crc)
+
+    def _recv_frame(self, reader: _FrameReader, timeout: float):
+        """Read one complete frame using *reader*.  Must hold ``_serial_lock``.
+
+        Returns ``(msg_type, seq, payload)`` or ``None`` on timeout.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                waiting = self._ser.in_waiting
+            except (serial.SerialException, OSError, AttributeError) as e:
+                raise TransportError(f"serial port inaccessible: {e}") from e
+
+            if waiting <= 0:
+                time.sleep(0.001)
+                continue
+
+            try:
+                data = self._ser.read(1)
+            except (serial.SerialException, OSError) as e:
+                raise TransportError(f"serial read error: {e}") from e
+
+            if not data:
+                continue
+
+            result = reader.feed(data[0])
+            if result is not None:
+                return result
+        return None
+
+    # ------------------------------------------------------------------
+    # Request / response core
+    # ------------------------------------------------------------------
+
+    def _request(
+        self,
+        msg_type: int,
+        payload: bytes,
+        accept_fn,
+        timeout: float = 2.0,
+        retries: int = 3,
+        retry_delay_ms: int = 80,
+    ):
+        """Send a request and wait for a matching response.
+
+        *accept_fn(msg_type)*  returns ``True`` for valid response message IDs.
+
+        Returns ``(response_msg_type, response_payload)``.
+
+        Holds ``_serial_lock`` during each send+receive cycle so the stream
+        thread does not steal response bytes.  The lock is released between
+        retries to let the stream thread make progress.
+        """
+        self._check_connected()
+
+        for attempt in range(1, retries + 1):
+            with self._serial_lock:
+                self._cmd_reader.reset()
+                seq = self._next_seq()
+                frame = self._build_frame(msg_type, seq, payload)
+
+                try:
+                    self._ser.reset_input_buffer()
+                    self._ser.write(frame)
+                    self._ser.flush()
+                except (serial.SerialException, OSError) as e:
+                    raise TransportError(f"serial write error: {e}") from e
+
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    remaining = deadline - time.monotonic()
+                    result = self._recv_frame(self._cmd_reader, timeout=max(remaining, 0.01))
+                    if result is None:
+                        break  # timeout this attempt
+
+                    r_msg_type, _, r_payload = result
+                    # swallow unsolicited stream frames that arrive during a request
+                    if r_msg_type == MSG_STATUS_STREAM:
+                        continue
+                    if accept_fn(r_msg_type):
+                        return (r_msg_type, r_payload)
+
+            if attempt < retries:
+                time.sleep(retry_delay_ms / 1000.0)
+
+        raise TransportTimeout(
+            f"request 0x{msg_type:02X} timed out after {retries} attempt(s)"
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    # -- ping ----------------------------------------------------------
+
+    def ping(self) -> bool:
+        """Send PING_REQ, return ``True`` on ACK."""
+        payload = struct.pack("<I", int(time.time() * 1000) & 0xFFFFFFFF)
+        try:
+            msg_type, resp = self._request(
+                MSG_PING_REQ,
+                payload,
+                accept_fn=lambda mt: mt in (MSG_ACK, MSG_NACK),
+            )
+        except TransportError:
+            return False
+
+        if msg_type == MSG_ACK and len(resp) >= 2:
+            return resp[0] == MSG_PING_REQ and resp[1] == 0
+        return False
+
+    # -- get_info ------------------------------------------------------
+
+    def get_info(self) -> dict:
+        """Send GET_DEVICE_INFO_REQ, return device info dict.
+
+        Keys: device_type, proto_version, fw_major, fw_minor, fw_patch,
+              cap_flags, max_payload
+        """
+        msg_type, resp = self._request(
+            MSG_GET_DEVICE_INFO_REQ,
+            b"",
+            accept_fn=lambda mt: mt in (MSG_DEVICE_INFO_RSP, MSG_NACK),
+        )
+
+        if msg_type == MSG_NACK:
+            reason = resp[1] if len(resp) >= 2 else 0
+            raise TransportError(f"get_info NACK reason={reason}")
+
+        if msg_type != MSG_DEVICE_INFO_RSP or len(resp) != 9:
+            raise TransportError(
+                f"get_info unexpected response: msg=0x{msg_type:02X} len={len(resp)}"
+            )
+
+        return {
+            "device_type": resp[0],
+            "proto_version": resp[1],
+            "fw_major": resp[2],
+            "fw_minor": resp[3],
+            "fw_patch": resp[4],
+            "cap_flags": struct.unpack_from("<H", resp, 5)[0],
+            "max_payload": struct.unpack_from("<H", resp, 7)[0],
+        }
+
+    # -- stream --------------------------------------------------------
+
+    def set_stream_callback(self, callback):
+        """Register *callback(callback(LiveFrame)* for incoming stream frames.
+
+        Pass ``None`` to stop callbacks.  The callback runs on the stream
+        background thread, so it must be quick or hand off work to a queue.
+        """
+        self._stream_callback = callback
+
+    def stream_start(self, rate_hz: int = 100) -> bool:
+        """Enable the STATUS_STREAM telemetry at *rate_hz* (1–200 Hz).
+
+        Returns ``True`` after the device ACKs and the background reader
+        thread is started.
+        """
+        self._check_connected()
+        if rate_hz <= 0:
+            return False
+
+        # Idempotent start: avoid duplicate reader threads.
+        if self._stream_thread is not None and self._stream_thread.is_alive():
+            if self._stream_rate_hz == rate_hz:
+                return True
+            self.stream_stop()
+
+        payload = struct.pack("<BBHI", 1, 0, rate_hz, 0xFFFFFFFF)
+        try:
+            msg_type, resp = self._request(
+                MSG_STREAM_CONTROL_REQ,
+                payload,
+                accept_fn=lambda mt: mt in (MSG_ACK, MSG_NACK),
+            )
+        except TransportError:
+            return False
+
+        if not (msg_type == MSG_ACK and len(resp) >= 2 and resp[1] == 0):
+            return False
+
+        self._stream_stop_event.clear()
+        self._stream_thread = threading.Thread(
+            target=self._stream_reader_thread,
+            name="dl-stream",
+            daemon=True,
+        )
+        self._stream_thread.start()
+        self._stream_rate_hz = rate_hz
+        return True
+
+    def stream_stop(self) -> bool:
+        """Stop the STATUS_STREAM telemetry.
+
+        Signals the background thread, joins it, then sends the disable
+        command to the device.  Safe to call when the stream is already
+        stopped or the port is disconnected.
+        """
+        # 1 — stop the local reader thread
+        stop_rate_hz = self._stream_rate_hz if self._stream_rate_hz is not None else 100
+        if self._stream_thread is not None:
+            self._stream_stop_event.set()
+            self._stream_thread.join(timeout=2.0)
+            self._stream_thread = None
+
+        # 2 — tell the device to stop
+        if not self.is_connected:
+            return False
+
+        payload = struct.pack("<BBHI", 0, 0, stop_rate_hz, 0)
+        try:
+            msg_type, resp = self._request(
+                MSG_STREAM_CONTROL_REQ,
+                payload,
+                accept_fn=lambda mt: mt in (MSG_ACK, MSG_NACK),
+                timeout=1.0,
+                retries=2,
+            )
+            ok = msg_type == MSG_ACK and len(resp) >= 2 and resp[1] == 0
+            if ok:
+                self._stream_rate_hz = None
+            return ok
+        except TransportError:
+            return False
+
+    def _stream_reader_thread(self):
+        """Background target: read frames, dispatch stream frames to callback."""
+        while not self._stream_stop_event.is_set():
+            with self._serial_lock:
+                self._stream_reader.reset()
+                try:
+                    result = self._recv_frame(self._stream_reader, timeout=0.2)
+                except TransportError:
+                    break  # serial port gone
+
+            if result is None:
+                continue
+
+            msg_type, _, payload = result
+            if msg_type != MSG_STATUS_STREAM:
+                continue
+
+            try:
+                host_rx_time_ms = int(time.time() * 1000)
+                frame = parse_status_stream(payload, host_rx_time_ms)
+            except ValueError:
+                continue
+
+            cb = self._stream_callback
+            if cb is not None:
+                try:
+                    cb(frame)
+                except Exception:
+                    pass  # don't let a user callback kill the thread
+
+    # -- fastcap -------------------------------------------------------
+
+    def fastcap_status(self) -> FastCapMeta:
+        """Query the current FastLog status.
+
+        Returns a :class:`FastCapMeta` with armed/done/blocked flags and
+        buffer counts.
+        """
+        payload = struct.pack("<B", OP_FASTCAP_STATUS)
+        msg_type, resp = self._request(
+            MSG_FAST_CAPTURE_REQ,
+            payload,
+            accept_fn=lambda mt: mt == MSG_FAST_CAPTURE_DATA,
+        )
+
+        if msg_type != MSG_FAST_CAPTURE_DATA:
+            raise TransportError(
+                f"fastcap_status unexpected response: msg=0x{msg_type:02X}"
+            )
+
+        try:
+            return parse_fastcap_status(resp)
+        except ValueError as e:
+            raise TransportError(f"fastcap_status parse error: {e}") from e
+
+    def fastcap_read_chunk(
+        self, start_idx: int, max_samples: int
+    ) -> tuple[FastCapMeta, list[FastCapSample]]:
+        """Read one chunk of FastLog samples starting at *start_idx*.
+
+        Returns ``(FastCapMeta, [FastCapSample, ...])``.
+        """
+        payload = struct.pack("<BHB", OP_FASTCAP_READ_CHUNK, start_idx, max_samples)
+        msg_type, resp = self._request(
+            MSG_FAST_CAPTURE_REQ,
+            payload,
+            accept_fn=lambda mt: mt == MSG_FAST_CAPTURE_DATA,
+        )
+
+        if msg_type != MSG_FAST_CAPTURE_DATA:
+            raise TransportError(
+                f"fastcap_read_chunk unexpected response: msg=0x{msg_type:02X}"
+            )
+
+        try:
+            return parse_fastcap_chunk(resp)
+        except ValueError as e:
+            raise TransportError(f"fastcap_read_chunk parse error: {e}") from e

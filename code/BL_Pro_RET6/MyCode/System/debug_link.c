@@ -156,8 +156,8 @@ static void DebugLink_HandleGetDeviceInfo(const DL_Frame_t *frame)
     payload[2] = DL_FW_MAJOR;
     payload[3] = DL_FW_MINOR;
     payload[4] = DL_FW_PATCH;
-    DL_WriteU16LE(&payload[5], DL_CAP_STATUS_STREAM | DL_CAP_POWER_STAGE_CONTROL |
-                               DL_CAP_ATTITUDE_CONTROL);
+    DL_WriteU16LE(&payload[5], DL_CAP_STATUS_STREAM | DL_CAP_FAST_CAPTURE |
+                               DL_CAP_POWER_STAGE_CONTROL | DL_CAP_ATTITUDE_CONTROL);
     DL_WriteU16LE(&payload[7], DL_PROTO_MAX_PAYLOAD);
 
     len = DL_Protocol_BuildFrame(DL_MSG_DEVICE_INFO_RSP, frame->seq,
@@ -247,6 +247,180 @@ static void DebugLink_HandleAttitudeControl(const DL_Frame_t *frame)
     DebugLink_SendAck(DL_MSG_ATTITUDE_CONTROL_REQ, DL_ACK_STATUS_OK);
 }
 
+/* ── FastLog 二进制协议（ARM/STATUS/READ_CHUNK/STOP）─── */
+#define DL_FASTCAP_OP_ARM        0x01U
+#define DL_FASTCAP_OP_STATUS     0x02U
+#define DL_FASTCAP_OP_READ_CHUNK 0x03U
+#define DL_FASTCAP_OP_STOP       0x04U
+#define DL_FASTCAP_MAX_SAMPLES_PER_CHUNK 22U   /* (240-11)/10 */
+
+static void DebugLink_HandleFastCapture(const DL_Frame_t *frame)
+{
+    uint8_t op;
+    uint16_t len;
+
+    if (frame->payload_len < 1U) {
+        DebugLink_SendNack(DL_MSG_FAST_CAPTURE_REQ, DL_NACK_BAD_LENGTH);
+        return;
+    }
+
+    op = frame->payload[0];
+
+    switch (op)
+    {
+    /* ── ARM ── */
+    case DL_FASTCAP_OP_ARM:
+    {
+        uint8_t source;
+
+        if (frame->payload_len < 2U) {
+            DebugLink_SendNack(DL_MSG_FAST_CAPTURE_REQ, DL_NACK_BAD_LENGTH);
+            return;
+        }
+
+        source = frame->payload[1];
+        if (source > 1U) {
+            DebugLink_SendNack(DL_MSG_FAST_CAPTURE_REQ, DL_NACK_BAD_PARAM_VALUE);
+            return;
+        }
+
+        if (App_SetFastLogSource(source) == 0U) {
+            DebugLink_SendNack(DL_MSG_FAST_CAPTURE_REQ, DL_NACK_BUSY);
+            return;
+        }
+
+        if (App_TryArmFastLog() == 0U) {
+            DebugLink_SendNack(DL_MSG_FAST_CAPTURE_REQ, DL_NACK_BUSY);
+            return;
+        }
+
+        DebugLink_SendAck(DL_MSG_FAST_CAPTURE_REQ, DL_ACK_STATUS_OK);
+        break;
+    }
+
+    /* ── STATUS ── */
+    case DL_FASTCAP_OP_STATUS:
+    {
+        uint16_t count;
+        uint8_t armed;
+        uint8_t done;
+        uint32_t capture_id;
+        uint8_t blocked;
+        uint8_t source;
+        uint8_t payload[16];
+
+        if (frame->payload_len < 1U) {
+            DebugLink_SendNack(DL_MSG_FAST_CAPTURE_REQ, DL_NACK_BAD_LENGTH);
+            return;
+        }
+
+        App_GetFastLogStatus(&count, &armed, &done, &capture_id, &blocked, &source);
+
+        payload[0] = DL_FASTCAP_OP_STATUS;
+        payload[1] = source;
+        DL_WriteU32LE(&payload[2], capture_id);
+        DL_WriteU16LE(&payload[6], count);
+        payload[8]  = armed;
+        payload[9]  = done;
+        payload[10] = blocked;
+        DL_WriteU16LE(&payload[11], (uint16_t)APP_FASTLOG_SIZE);
+
+        len = DL_Protocol_BuildFrame(DL_MSG_FAST_CAPTURE_DATA, frame->seq,
+                                     payload, 13U,
+                                     s_tx_buf, sizeof(s_tx_buf));
+        if (len > 0U) {
+            (void)DebugLink_TryTransmit(s_tx_buf, len);
+        }
+        break;
+    }
+
+    /* ── READ_CHUNK ── */
+    case DL_FASTCAP_OP_READ_CHUNK:
+    {
+        uint16_t start_idx;
+        uint8_t max_samples;
+        uint16_t total_count;
+        uint32_t capture_id;
+        uint8_t source;
+        uint8_t sample_count;
+        uint8_t i;
+        uint8_t payload[DL_PROTO_MAX_PAYLOAD];
+
+        if (frame->payload_len < 4U) {
+            DebugLink_SendNack(DL_MSG_FAST_CAPTURE_REQ, DL_NACK_BAD_LENGTH);
+            return;
+        }
+
+        start_idx   = DL_ReadU16LE(&frame->payload[1]);
+        max_samples = frame->payload[3];
+        if (max_samples > DL_FASTCAP_MAX_SAMPLES_PER_CHUNK) {
+            max_samples = DL_FASTCAP_MAX_SAMPLES_PER_CHUNK;
+        }
+
+        /* 一次调用拿齐状态 */
+        {
+            uint8_t armed, done, blocked;
+            App_GetFastLogStatus(&total_count, &armed, &done, &capture_id, &blocked, &source);
+        }
+
+        {
+            FastLogSample_t chunk[DL_FASTCAP_MAX_SAMPLES_PER_CHUNK];
+            int16_t val;
+
+            sample_count = App_CopyFastLogChunk(start_idx, max_samples, chunk);
+
+            payload[0] = DL_FASTCAP_OP_READ_CHUNK;
+            payload[1] = source;
+            DL_WriteU32LE(&payload[2], capture_id);
+            DL_WriteU16LE(&payload[6], total_count);
+            DL_WriteU16LE(&payload[8], start_idx);
+            payload[10] = sample_count;
+
+            for (i = 0U; i < sample_count; i++) {
+                uint8_t *p = &payload[11U + (uint16_t)i * 10U];
+
+                val = (int16_t)(chunk[i].target_iq * 1000.0f);
+                DL_WriteU16LE(&p[0], (uint16_t)val);
+                val = (int16_t)(chunk[i].iq_ref * 1000.0f);
+                DL_WriteU16LE(&p[2], (uint16_t)val);
+                val = (int16_t)(chunk[i].filtered_iq * 1000.0f);
+                DL_WriteU16LE(&p[4], (uint16_t)val);
+                val = (int16_t)(chunk[i].raw_iq * 1000.0f);
+                DL_WriteU16LE(&p[6], (uint16_t)val);
+                val = (int16_t)(chunk[i].uq_final * 1000.0f);
+                DL_WriteU16LE(&p[8], (uint16_t)val);
+            }
+
+            len = DL_Protocol_BuildFrame(DL_MSG_FAST_CAPTURE_DATA, frame->seq,
+                                         payload,
+                                         (uint16_t)(11U + (uint16_t)sample_count * 10U),
+                                         s_tx_buf, sizeof(s_tx_buf));
+            if (len > 0U) {
+                (void)DebugLink_TryTransmit(s_tx_buf, len);
+            }
+        }
+        break;
+    }
+
+    /* ── STOP ── */
+    case DL_FASTCAP_OP_STOP:
+    {
+        if (frame->payload_len < 1U) {
+            DebugLink_SendNack(DL_MSG_FAST_CAPTURE_REQ, DL_NACK_BAD_LENGTH);
+            return;
+        }
+
+        App_StopFastLog();
+        DebugLink_SendAck(DL_MSG_FAST_CAPTURE_REQ, DL_ACK_STATUS_OK);
+        break;
+    }
+
+    default:
+        DebugLink_SendNack(DL_MSG_FAST_CAPTURE_REQ, DL_NACK_UNSUPPORTED);
+        break;
+    }
+}
+
 static void DebugLink_SendStatusStream(void)
 {
     uint8_t payload[42];
@@ -324,6 +498,10 @@ static void DebugLink_ProcessRxFrame(void)
 
     case DL_MSG_ATTITUDE_CONTROL_REQ:
         DebugLink_HandleAttitudeControl(&frame);
+        break;
+
+    case DL_MSG_FAST_CAPTURE_REQ:
+        DebugLink_HandleFastCapture(&frame);
         break;
 
     default:

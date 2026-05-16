@@ -20,6 +20,8 @@ import time
 
 import serial
 
+from debuglink_parser import parse_fastcap_chunk, parse_fastcap_status, parse_status_stream
+
 SOF0 = 0x5A
 SOF1 = 0xA5
 VERSION = 0x01
@@ -33,6 +35,17 @@ MSG_ACK = 0x80
 MSG_NACK = 0x81
 MSG_DEVICE_INFO_RSP = 0x82
 MSG_STATUS_STREAM = 0x90
+MSG_FAST_CAPTURE_REQ = 0x14
+MSG_FAST_CAPTURE_DATA = 0x91
+
+OP_FASTCAP_ARM = 0x01
+OP_FASTCAP_STATUS = 0x02
+OP_FASTCAP_READ_CHUNK = 0x03
+OP_FASTCAP_STOP = 0x04
+
+FASTCAP_SOURCE_LEFT = 0
+FASTCAP_SOURCE_RIGHT = 1
+FASTCAP_CHUNK_MAX = 22  # (240 - 11) // 10
 
 FOC_STATUS_FLAG_SPEED_FAULT_L = 1 << 0
 FOC_STATUS_FLAG_SPEED_FAULT_R = 1 << 1
@@ -419,30 +432,37 @@ def cmd_stream(ser: serial.Serial, rate: int, retries: int, retry_delay_ms: int)
             continue
 
         msg_type, _, payload = result
-        if msg_type != MSG_STATUS_STREAM or len(payload) < 42:
+        if msg_type != MSG_STATUS_STREAM:
             continue
 
-        tick_ms = struct.unpack_from("<I", payload, 0)[0]
-        pitch_target = struct.unpack_from("<h", payload, 4)[0] / 100.0
-        speed_p_term = struct.unpack_from("<h", payload, 6)[0] / 100.0
-        speed_i_term = struct.unpack_from("<h", payload, 8)[0] / 100.0
-        pitch_meas = struct.unpack_from("<h", payload, 10)[0] / 100.0
-        pitch_rate = struct.unpack_from("<h", payload, 12)[0] / 100.0
-        speed_target = struct.unpack_from("<h", payload, 14)[0] / 1000.0
-        speed_meas = struct.unpack_from("<h", payload, 16)[0] / 1000.0
-        attitude_p_term = struct.unpack_from("<h", payload, 18)[0] / 1000.0
-        attitude_d_term = struct.unpack_from("<h", payload, 20)[0] / 1000.0
-        iq_cmd = struct.unpack_from("<h", payload, 22)[0] / 1000.0
-        iq_cmd_clamped = struct.unpack_from("<h", payload, 24)[0] / 1000.0
-        speed_output_limit = struct.unpack_from("<h", payload, 26)[0] / 100.0
-        attitude_output_limit = struct.unpack_from("<h", payload, 28)[0] / 1000.0
-        iq_l = struct.unpack_from("<h", payload, 30)[0] / 1000.0
-        iq_r = struct.unpack_from("<h", payload, 32)[0] / 1000.0
-        uq_l = struct.unpack_from("<h", payload, 34)[0] / 1000.0
-        uq_r = struct.unpack_from("<h", payload, 36)[0] / 1000.0
-        bus_v = struct.unpack_from("<H", payload, 38)[0] / 1000.0
-        fault = struct.unpack_from("<H", payload, 40)[0]
-        fault_text = format_foc_status(fault)
+        try:
+            host_rx_time_ms = int(time.time() * 1000)
+            frame = parse_status_stream(payload, host_rx_time_ms)
+        except ValueError as e:
+            print(f"[WARN] stream parse error: {e}")
+            continue
+
+        tick_ms = frame.tick_ms
+        pitch_target = frame.pitch_target_deg
+        speed_p_term = frame.speed_p_term_deg
+        speed_i_term = frame.speed_i_term_deg
+        pitch_meas = frame.pitch_meas_deg
+        pitch_rate = frame.pitch_rate_dps
+        speed_target = frame.speed_target_radps
+        speed_meas = frame.speed_meas_radps
+        attitude_p_term = frame.attitude_p_iq_cmd_a
+        attitude_d_term = frame.attitude_d_iq_cmd_a
+        iq_cmd = frame.iq_cmd_a
+        iq_cmd_clamped = frame.iq_cmd_clamped_a
+        speed_output_limit = frame.speed_output_limit_deg
+        attitude_output_limit = frame.attitude_output_limit_a
+        iq_l = frame.iq_l_a
+        iq_r = frame.iq_r_a
+        uq_l = frame.uq_l_v
+        uq_r = frame.uq_r_v
+        bus_v = frame.bus_v
+        fault = frame.fault_flags
+        fault_text = frame.fault_labels
 
         print(
             f"t={tick_ms:>8} pitch_target={pitch_target:>+6.2f}deg "
@@ -559,6 +579,231 @@ def cmd_balance(ser: serial.Serial, enable: bool, retries: int, retry_delay_ms: 
     return False
 
 
+def cmd_fastcap_arm(ser: serial.Serial, side: str, retries: int, retry_delay_ms: int):
+    reader = FrameReader()
+    seq = 7
+    source = FASTCAP_SOURCE_LEFT if side.upper() == "L" else FASTCAP_SOURCE_RIGHT
+    payload = struct.pack("<BB", OP_FASTCAP_ARM, source)
+    frame = build_frame(MSG_FAST_CAPTURE_REQ, seq, payload)
+
+    print(f"[TX] FAST_CAPTURE_REQ ARM source={side.upper()}")
+    result = send_frame_and_wait(
+        ser, reader, frame, "FASTCAP_ARM",
+        2.0, retries, retry_delay_ms,
+        accept_fn=lambda r: r[0] in (MSG_ACK, MSG_NACK),
+    )
+    if result is None:
+        return False
+
+    msg_type, _, resp = result
+    if msg_type == MSG_ACK and len(resp) >= 2 and resp[1] == 0:
+        print("[RX] ACK -> FastLog armed")
+        return True
+    if msg_type == MSG_NACK and len(resp) >= 2:
+        nack_reasons = {1: "BAD_LENGTH", 3: "BAD_PARAM_VALUE", 4: "BUSY", 5: "UNSUPPORTED"}
+        reason = nack_reasons.get(resp[1], f"code={resp[1]}")
+        print(f"[RX] NACK reason={reason}")
+    return False
+
+
+def cmd_fastcap_status(ser: serial.Serial, retries: int, retry_delay_ms: int):
+    reader = FrameReader()
+    seq = 8
+    payload = struct.pack("<B", OP_FASTCAP_STATUS)
+    frame = build_frame(MSG_FAST_CAPTURE_REQ, seq, payload)
+
+    print("[TX] FAST_CAPTURE_REQ STATUS")
+    result = send_frame_and_wait(
+        ser, reader, frame, "FASTCAP_STATUS",
+        2.0, retries, retry_delay_ms,
+        accept_fn=lambda r: r[0] == MSG_FAST_CAPTURE_DATA,
+    )
+    if result is None:
+        return None
+
+    _, _, pld = result
+    try:
+        meta = parse_fastcap_status(pld)
+    except ValueError as e:
+        print(f"[WARN] fastcap status parse error: {e}")
+        return None
+
+    source      = meta.source
+    capture_id  = meta.capture_id
+    total_count = meta.total_count
+    armed       = 1 if meta.armed else 0
+    done        = 1 if meta.done else 0
+    blocked     = 1 if meta.blocked else 0
+    capacity    = meta.capacity
+
+    side_label = "R" if source == FASTCAP_SOURCE_RIGHT else "L"
+
+    print(f"[RX] FAST_CAPTURE_DATA STATUS")
+    print(f"  source       = {side_label}")
+    print(f"  capture_id   = {capture_id}")
+    print(f"  total_count  = {total_count}")
+    print(f"  armed        = {armed}")
+    print(f"  done         = {done}")
+    print(f"  blocked      = {blocked}")
+    print(f"  capacity     = {capacity}")
+
+    return {
+        "source": source,
+        "capture_id": capture_id,
+        "total_count": total_count,
+        "armed": armed,
+        "done": done,
+        "blocked": blocked,
+        "capacity": capacity,
+    }
+
+
+def cmd_fastcap_stop(ser: serial.Serial, retries: int, retry_delay_ms: int):
+    reader = FrameReader()
+    seq = 9
+    payload = struct.pack("<B", OP_FASTCAP_STOP)
+    frame = build_frame(MSG_FAST_CAPTURE_REQ, seq, payload)
+
+    print("[TX] FAST_CAPTURE_REQ STOP")
+    result = send_frame_and_wait(
+        ser, reader, frame, "FASTCAP_STOP",
+        2.0, retries, retry_delay_ms,
+        accept_fn=lambda r: r[0] in (MSG_ACK, MSG_NACK),
+    )
+    if result is None:
+        return False
+
+    msg_type, _, resp = result
+    if msg_type == MSG_ACK and len(resp) >= 2 and resp[1] == 0:
+        print("[RX] ACK -> FastLog stopped")
+        return True
+    if msg_type == MSG_NACK and len(resp) >= 2:
+        print(f"[RX] NACK reason={resp[1]}")
+    return False
+
+
+def cmd_fastcap_dump(
+    ser: serial.Serial,
+    side: str,
+    out_file: str,
+    retries: int,
+    retry_delay_ms: int,
+    poll_ms: int = 50,
+    timeout_s: float = 5.0,
+):
+    reader = FrameReader()
+    seq_base = 20
+    requested_source = FASTCAP_SOURCE_LEFT if side.upper() == "L" else FASTCAP_SOURCE_RIGHT
+    status = cmd_fastcap_status(ser, retries, retry_delay_ms)
+
+    if (
+        status is not None
+        and status["done"]
+        and status["total_count"] > 0
+        and status["source"] == requested_source
+    ):
+        print("[DUMP] reusing completed capture from matching side")
+    else:
+        if status is not None and status["done"] and status["total_count"] > 0:
+            current_side = "R" if status["source"] == FASTCAP_SOURCE_RIGHT else "L"
+            print(f"[DUMP] clearing completed capture from side {current_side} before re-arming")
+            if not cmd_fastcap_stop(ser, retries, retry_delay_ms):
+                print("[ERROR] STOP failed while clearing previous capture")
+                return False
+
+        if not cmd_fastcap_arm(ser, side, retries, retry_delay_ms):
+            print("[ERROR] ARM failed")
+            return False
+        seq_base += 1
+
+        deadline = time.monotonic() + timeout_s
+        status = None
+        while time.monotonic() < deadline:
+            sleep_ms(poll_ms)
+            status = cmd_fastcap_status(ser, retries, retry_delay_ms)
+            if status is None:
+                continue
+            seq_base += 1
+            if status["done"]:
+                break
+
+        if status is None or not status["done"]:
+            print(f"[ERROR] capture did not complete within {timeout_s}s")
+            if status:
+                print(f"  armed={status['armed']} done={status['done']}")
+            return False
+
+    total_count = status["total_count"]
+    capture_id = status["capture_id"]
+    source = status["source"]
+    side_label = "R" if source == FASTCAP_SOURCE_RIGHT else "L"
+
+    print(f"[DUMP] capture_id={capture_id} motor={side_label} samples={total_count}")
+
+    all_samples = []
+    start_idx = 0
+    while start_idx < total_count:
+        remaining = total_count - start_idx
+        max_req = min(FASTCAP_CHUNK_MAX, remaining)
+
+        payload = struct.pack("<BHB", OP_FASTCAP_READ_CHUNK, start_idx, max_req)
+        frame = build_frame(MSG_FAST_CAPTURE_REQ, seq_base & 0xFF, payload)
+        seq_base += 1
+
+        result = send_frame_and_wait(
+            ser, reader, frame, f"FASTCAP_READ_CHUNK start={start_idx}",
+            2.0, retries, retry_delay_ms,
+            accept_fn=lambda r: r[0] == MSG_FAST_CAPTURE_DATA,
+        )
+        if result is None:
+            print(f"[WARN] READ_CHUNK start={start_idx} timed out, retrying ...")
+            continue
+
+        _, _, pld = result
+        try:
+            chunk_meta, chunk_samples = parse_fastcap_chunk(pld)
+        except ValueError as e:
+            print(f"[WARN] fastcap chunk parse error: {e}")
+            continue
+
+        if chunk_meta.op_echo != OP_FASTCAP_READ_CHUNK:
+            print(f"[WARN] unexpected op_echo=0x{chunk_meta.op_echo:02X}, skipping")
+            continue
+        if chunk_meta.capture_id != capture_id:
+            print(f"[WARN] capture_id mismatch: got {chunk_meta.capture_id}, expected {capture_id}, skipping")
+            continue
+        if chunk_meta.source != source:
+            print(f"[WARN] source mismatch: got {chunk_meta.source}, expected {source}, skipping")
+            continue
+
+        sample_count = len(chunk_samples)
+        if sample_count == 0:
+            break
+
+        if chunk_samples[0].index != start_idx:
+            print(f"[WARN] start_idx mismatch: got {chunk_samples[0].index}, expected {start_idx}, skipping")
+            continue
+
+        all_samples.extend(chunk_samples)
+
+        start_idx += sample_count
+
+    try:
+        with open(out_file, "w", newline="") as f:
+            f.write("idx,target_iq,iq_ref,filtered_iq,raw_iq,uq_final,source,capture_id\n")
+            for idx, s in enumerate(all_samples):
+                f.write(f"{idx},{s.target_iq_a:.6f},{s.iq_ref_a:.6f},{s.filtered_iq_a:.6f},{s.raw_iq_a:.6f},{s.uq_final_v:.6f},{side_label},{capture_id}\n")
+        print(f"[DUMP] wrote {len(all_samples)} samples to {out_file}")
+    except OSError as e:
+        print(f"[ERROR] cannot write {out_file}: {e}")
+        if not cmd_fastcap_stop(ser, retries, retry_delay_ms):
+            print("[WARN] STOP after write failure did not ACK")
+        return False
+
+    cmd_fastcap_stop(ser, retries, retry_delay_ms)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="DebugLink CLI")
     parser.add_argument("--port", required=True, help="Serial port (e.g. COM33)")
@@ -599,6 +844,21 @@ def main():
     p_stream = sub.add_parser("stream", help="Start status stream")
     p_stream.add_argument("--rate", type=int, default=100, help="Stream rate Hz")
 
+    p_fastcap = sub.add_parser("fastcap", help="FastLog capture commands (binary protocol)")
+    fastcap_sub = p_fastcap.add_subparsers(dest="fastcap_op")
+
+    p_fc_arm = fastcap_sub.add_parser("arm", help="Arm FastLog")
+    p_fc_arm.add_argument("side", choices=("L", "R"), help="Motor side (L or R)")
+
+    fastcap_sub.add_parser("status", help="Query FastLog status")
+    fastcap_sub.add_parser("stop", help="Stop active FastLog capture")
+
+    p_fc_dump = fastcap_sub.add_parser("dump", help="Arm, wait, read all, and write CSV")
+    p_fc_dump.add_argument("--side", required=True, choices=("L", "R"), help="Motor side")
+    p_fc_dump.add_argument("--out", required=True, help="Output CSV file path")
+    p_fc_dump.add_argument("--timeout", type=float, default=5.0, help="Capture completion timeout seconds")
+    p_fc_dump.add_argument("--poll-ms", type=int, default=50, help="STATUS poll interval ms")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -619,6 +879,22 @@ def main():
             ok = cmd_balance(ser, args.state == "on", args.retries, args.retry_delay_ms)
         elif args.command == "stream":
             ok = cmd_stream(ser, args.rate, args.retries, args.retry_delay_ms)
+        elif args.command == "fastcap":
+            if args.fastcap_op is None:
+                p_fastcap.print_help()
+                sys.exit(1)
+            if args.fastcap_op == "arm":
+                ok = cmd_fastcap_arm(ser, args.side, args.retries, args.retry_delay_ms)
+            elif args.fastcap_op == "status":
+                ok = cmd_fastcap_status(ser, args.retries, args.retry_delay_ms) is not None
+            elif args.fastcap_op == "stop":
+                ok = cmd_fastcap_stop(ser, args.retries, args.retry_delay_ms)
+            elif args.fastcap_op == "dump":
+                ok = cmd_fastcap_dump(
+                    ser, args.side, args.out,
+                    args.retries, args.retry_delay_ms,
+                    args.poll_ms, args.timeout,
+                )
     except serial.SerialException as e:
         print(f"[ERROR] {e}")
     finally:
