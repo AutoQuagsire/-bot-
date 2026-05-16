@@ -12,7 +12,7 @@ typedef enum {
     SENSOR_AS5600,
 } SensorType_t;
 
-#define SENSOR_VEL_WIN_NUMBER 5U
+#define SENSOR_VEL_WIN_NUMBER 10U
 #define SENSOR_VEL_WIN_MAX (SENSOR_VEL_WIN_NUMBER + 1U)
 
 typedef struct {
