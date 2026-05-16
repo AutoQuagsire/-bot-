@@ -1454,34 +1454,15 @@ static uint8_t App_BusVoltageStartupSample(void)
 
 /* FastLog：一次性高速采样缓存。
  * 用于捕获电流阶跃响应，避免实时串口打印影响 10kHz 控制循环。
+ * FastLogSample_t 和 APP_FASTLOG_SIZE 定义在 app_foc.h（debug_link.c 也需要）。
  */
-#define APP_FASTLOG_SIZE (512U)
-
-typedef struct {
-    float target_iq;
-    float iq_ref;
-    float filtered_iq;
-    float raw_iq;
-    float pi_out;
-    float ff_term;
-    float uq_final;
-    float ff_coef;
-    float integral_limit;
-    float pid_integral;
-    float shaft_angle;
-    float shaft_velocity;
-    float electrical_angle;
-    float bus_raw_adc;
-    float bus_pin_voltage;
-    float bus_voltage;
-} FastLogSample_t;
-
 static FastLogSample_t g_fastlog_buf[APP_FASTLOG_SIZE];
 static volatile uint16_t g_fastlog_count = 0U;
 static volatile uint8_t  g_fastlog_armed = 0U;
 static volatile uint8_t  g_fastlog_done  = 0U;
 static volatile uint32_t g_fastlog_capture_id = 0U;
 static volatile uint8_t  g_fastlog_blocked = 0U;
+static volatile uint8_t  g_fastlog_source = FASTLOG_SOURCE_LEFT;
 
 
 /* FastLog 上膛。
@@ -1528,19 +1509,35 @@ void App_StopFastLog(void)
     __enable_irq();
 }
 
+uint8_t App_SetFastLogSource(uint8_t source)
+{
+    uint8_t ok;
+    __disable_irq();
+    if (g_fastlog_armed) {
+        ok = 0U;
+    } else {
+        g_fastlog_source = source;
+        ok = 1U;
+    }
+    __enable_irq();
+    return ok;
+}
+
 
 /* 获取 FastLog 状态，供上位机/命令接口查询 */
 void App_GetFastLogStatus(uint16_t *count,
                           uint8_t *armed,
                           uint8_t *done,
                           uint32_t *capture_id,
-                          uint8_t *blocked)
+                          uint8_t *blocked,
+                          uint8_t *source)
 {
     uint16_t local_count;
     uint8_t local_armed;
     uint8_t local_done;
     uint32_t local_capture_id;
     uint8_t local_blocked;
+    uint8_t local_source;
 
     __disable_irq();
     local_count = g_fastlog_count;
@@ -1548,6 +1545,7 @@ void App_GetFastLogStatus(uint16_t *count,
     local_done = g_fastlog_done;
     local_capture_id = g_fastlog_capture_id;
     local_blocked = g_fastlog_blocked;
+    local_source  = g_fastlog_source;
     __enable_irq();
 
     if (count != NULL) {
@@ -1565,6 +1563,40 @@ void App_GetFastLogStatus(uint16_t *count,
     if (blocked != NULL) {
         *blocked = local_blocked;
     }
+    if (source != NULL) {
+        *source = local_source;
+    }
+}
+
+uint8_t App_CopyFastLogChunk(uint16_t start_idx,
+                             uint8_t max_samples,
+                             FastLogSample_t *out)
+{
+    uint16_t available;
+    uint8_t i;
+
+    if (out == NULL || max_samples == 0U) {
+        return 0U;
+    }
+
+    __disable_irq();
+
+    if (start_idx >= g_fastlog_count) {
+        __enable_irq();
+        return 0U;
+    }
+
+    available = (uint16_t)(g_fastlog_count - start_idx);
+    if ((uint16_t)max_samples < available) {
+        available = (uint16_t)max_samples;
+    }
+
+    for (i = 0U; i < (uint8_t)available; i++) {
+        out[i] = g_fastlog_buf[(uint16_t)(start_idx + (uint16_t)i)];
+    }
+
+    __enable_irq();
+    return (uint8_t)available;
 }
 
 
@@ -1732,8 +1764,11 @@ static uint8_t loopFOC(void)
             Motor_SetPhaseVoltageQBySinCos(&g_motor2, 0.0f, sin_e2, cos_e2);
         }
 
-        /* 当前 FastLog 记录左电机电流环数据 */
-        fastlog_push(&g_motor1, &g_current_loop_debug1);
+        if (g_fastlog_source == FASTLOG_SOURCE_RIGHT) {
+            fastlog_push(&g_motor2, &g_current_loop_debug2);
+        } else {
+            fastlog_push(&g_motor1, &g_current_loop_debug1);
+        }
     }
 
     return 1U;
@@ -1835,13 +1870,16 @@ void DebuginWhile(void)
         return;
     }
 
+    uint8_t source;
     __disable_irq();
     sample_count = g_fastlog_count;
-    capture_id = g_fastlog_capture_id;
+    capture_id   = g_fastlog_capture_id;
+    source       = g_fastlog_source;
     __enable_irq();
 
-    USB_Debug_Printf("[FASTLOG] capture=%lu motor=L samples=%u format=target_iq,iq_ref,filtered_iq,raw_iq,pi_out,ff_term,uq_final,ff_coef,integral_limit,pid_integral,shaft_angle,shaft_velocity,electrical_angle,bus_raw_adc,bus_pin_voltage,bus_voltage\r\n",
+    USB_Debug_Printf("[FASTLOG] capture=%lu motor=%c samples=%u format=target_iq,iq_ref,filtered_iq,raw_iq,pi_out,ff_term,uq_final,ff_coef,integral_limit,pid_integral,shaft_angle,shaft_velocity,electrical_angle,bus_raw_adc,bus_pin_voltage,bus_voltage\r\n",
                      (unsigned long)capture_id,
+                     (source == FASTLOG_SOURCE_RIGHT) ? 'R' : 'L',
                      (unsigned)sample_count);
 
     for (i = 0U; i < sample_count; i++) {

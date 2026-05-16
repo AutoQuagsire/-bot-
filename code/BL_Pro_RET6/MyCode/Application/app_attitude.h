@@ -11,12 +11,18 @@
 typedef struct
 {
     float pitch_target_rad;
+    float speed_p_term_rad;
+    float speed_i_term_rad;
     float pitch_meas_rad;
     float pitch_rate_meas_radps;
     float speed_target_radps;
     float speed_meas_radps;
+    float attitude_p_term_a;
+    float attitude_d_term_a;
     float iq_cmd_a;
     float iq_cmd_clamped_a;
+    float speed_output_limit_rad;
+    float attitude_output_limit_a;
 } App_AttitudeTelemetry_t;
 
 uint8_t App_Attitude_Init(void);

@@ -419,32 +419,42 @@ def cmd_stream(ser: serial.Serial, rate: int, retries: int, retry_delay_ms: int)
             continue
 
         msg_type, _, payload = result
-        if msg_type != MSG_STATUS_STREAM or len(payload) < 34:
+        if msg_type != MSG_STATUS_STREAM or len(payload) < 42:
             continue
 
         tick_ms = struct.unpack_from("<I", payload, 0)[0]
         pitch_target = struct.unpack_from("<h", payload, 4)[0] / 100.0
-        pitch_meas = struct.unpack_from("<h", payload, 6)[0] / 100.0
-        pitch_rate = struct.unpack_from("<h", payload, 8)[0] / 100.0
-        speed_target = struct.unpack_from("<h", payload, 10)[0] / 1000.0
-        speed_meas = struct.unpack_from("<h", payload, 12)[0] / 1000.0
-        iq_cmd = struct.unpack_from("<h", payload, 14)[0] / 1000.0
-        iq_cmd_clamped = struct.unpack_from("<h", payload, 16)[0] / 1000.0
-        vel_l = struct.unpack_from("<h", payload, 18)[0] / 1000.0
-        vel_r = struct.unpack_from("<h", payload, 20)[0] / 1000.0
-        iq_l = struct.unpack_from("<h", payload, 22)[0] / 1000.0
-        iq_r = struct.unpack_from("<h", payload, 24)[0] / 1000.0
-        uq_l = struct.unpack_from("<h", payload, 26)[0] / 1000.0
-        uq_r = struct.unpack_from("<h", payload, 28)[0] / 1000.0
-        bus_v = struct.unpack_from("<H", payload, 30)[0] / 1000.0
-        fault = struct.unpack_from("<H", payload, 32)[0]
+        speed_p_term = struct.unpack_from("<h", payload, 6)[0] / 100.0
+        speed_i_term = struct.unpack_from("<h", payload, 8)[0] / 100.0
+        pitch_meas = struct.unpack_from("<h", payload, 10)[0] / 100.0
+        pitch_rate = struct.unpack_from("<h", payload, 12)[0] / 100.0
+        speed_target = struct.unpack_from("<h", payload, 14)[0] / 1000.0
+        speed_meas = struct.unpack_from("<h", payload, 16)[0] / 1000.0
+        attitude_p_term = struct.unpack_from("<h", payload, 18)[0] / 1000.0
+        attitude_d_term = struct.unpack_from("<h", payload, 20)[0] / 1000.0
+        iq_cmd = struct.unpack_from("<h", payload, 22)[0] / 1000.0
+        iq_cmd_clamped = struct.unpack_from("<h", payload, 24)[0] / 1000.0
+        speed_output_limit = struct.unpack_from("<h", payload, 26)[0] / 100.0
+        attitude_output_limit = struct.unpack_from("<h", payload, 28)[0] / 1000.0
+        iq_l = struct.unpack_from("<h", payload, 30)[0] / 1000.0
+        iq_r = struct.unpack_from("<h", payload, 32)[0] / 1000.0
+        uq_l = struct.unpack_from("<h", payload, 34)[0] / 1000.0
+        uq_r = struct.unpack_from("<h", payload, 36)[0] / 1000.0
+        bus_v = struct.unpack_from("<H", payload, 38)[0] / 1000.0
+        fault = struct.unpack_from("<H", payload, 40)[0]
         fault_text = format_foc_status(fault)
 
         print(
             f"t={tick_ms:>8} pitch_target={pitch_target:>+6.2f}deg "
+            f"speed_p_term={speed_p_term:>+6.2f}deg "
+            f"speed_i_term={speed_i_term:>+6.2f}deg "
             f"pitch_meas={pitch_meas:>+6.2f}deg pitch_rate={pitch_rate:>+7.2f}dps "
             f"speed_target={speed_target:>+6.3f} speed_meas={speed_meas:>+6.3f} "
+            f"attitude_p_term={attitude_p_term:>+5.3f} "
+            f"attitude_d_term={attitude_d_term:>+5.3f} "
             f"iq_cmd={iq_cmd:>+5.3f} iq_cmd_clamped={iq_cmd_clamped:>+5.3f} "
+            f"speed_output_limit={speed_output_limit:>+6.2f}deg "
+            f"attitude_output_limit={attitude_output_limit:>+5.3f} "
             f"iq_l={iq_l:>+5.3f} iq_r={iq_r:>+5.3f} "
             f"uq_l={uq_l:>5.2f}V uq_r={uq_r:>5.2f}V "
             f"bus={bus_v:>6.2f}V fault=0x{fault:04X} [{fault_text}]"

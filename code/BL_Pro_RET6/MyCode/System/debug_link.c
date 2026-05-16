@@ -249,7 +249,7 @@ static void DebugLink_HandleAttitudeControl(const DL_Frame_t *frame)
 
 static void DebugLink_SendStatusStream(void)
 {
-    uint8_t payload[34];
+    uint8_t payload[42];
     uint16_t len;
     DebugLink_StatusSnapshot_t st;
 
@@ -259,20 +259,24 @@ static void DebugLink_SendStatusStream(void)
 
     DL_WriteU32LE(&payload[0], st.tick_ms);
     DL_WriteU16LE(&payload[4], (uint16_t)st.pitch_target_deg_x100);
-    DL_WriteU16LE(&payload[6], (uint16_t)st.pitch_meas_deg_x100);
-    DL_WriteU16LE(&payload[8], (uint16_t)st.pitch_rate_dps_x100);
-    DL_WriteU16LE(&payload[10], (uint16_t)st.speed_target_radps_x1000);
-    DL_WriteU16LE(&payload[12], (uint16_t)st.speed_meas_radps_x1000);
-    DL_WriteU16LE(&payload[14], (uint16_t)st.iq_cmd_ma);
-    DL_WriteU16LE(&payload[16], (uint16_t)st.iq_cmd_clamped_ma);
-    DL_WriteU16LE(&payload[18], (uint16_t)st.wheel_vel_l_x1000);
-    DL_WriteU16LE(&payload[20], (uint16_t)st.wheel_vel_r_x1000);
-    DL_WriteU16LE(&payload[22], (uint16_t)st.iq_l_x1000);
-    DL_WriteU16LE(&payload[24], (uint16_t)st.iq_r_x1000);
-    DL_WriteU16LE(&payload[26], (uint16_t)st.uq_l_mv);
-    DL_WriteU16LE(&payload[28], (uint16_t)st.uq_r_mv);
-    DL_WriteU16LE(&payload[30], st.bus_mv);
-    DL_WriteU16LE(&payload[32], st.fault_flags);
+    DL_WriteU16LE(&payload[6], (uint16_t)st.speed_p_term_deg_x100);
+    DL_WriteU16LE(&payload[8], (uint16_t)st.speed_i_term_deg_x100);
+    DL_WriteU16LE(&payload[10], (uint16_t)st.pitch_meas_deg_x100);
+    DL_WriteU16LE(&payload[12], (uint16_t)st.pitch_rate_dps_x100);
+    DL_WriteU16LE(&payload[14], (uint16_t)st.speed_target_radps_x1000);
+    DL_WriteU16LE(&payload[16], (uint16_t)st.speed_meas_radps_x1000);
+    DL_WriteU16LE(&payload[18], (uint16_t)st.attitude_p_term_ma);
+    DL_WriteU16LE(&payload[20], (uint16_t)st.attitude_d_term_ma);
+    DL_WriteU16LE(&payload[22], (uint16_t)st.iq_cmd_ma);
+    DL_WriteU16LE(&payload[24], (uint16_t)st.iq_cmd_clamped_ma);
+    DL_WriteU16LE(&payload[26], (uint16_t)st.speed_output_limit_deg_x100);
+    DL_WriteU16LE(&payload[28], (uint16_t)st.attitude_output_limit_ma);
+    DL_WriteU16LE(&payload[30], (uint16_t)st.iq_l_x1000);
+    DL_WriteU16LE(&payload[32], (uint16_t)st.iq_r_x1000);
+    DL_WriteU16LE(&payload[34], (uint16_t)st.uq_l_mv);
+    DL_WriteU16LE(&payload[36], (uint16_t)st.uq_r_mv);
+    DL_WriteU16LE(&payload[38], st.bus_mv);
+    DL_WriteU16LE(&payload[40], st.fault_flags);
 
     len = DL_Protocol_BuildFrame(DL_MSG_STATUS_STREAM, 0U,
                                  payload, sizeof(payload),

@@ -26,14 +26,18 @@ typedef struct
 {
     uint32_t tick_ms;
     int16_t  pitch_target_deg_x100;
+    int16_t  speed_p_term_deg_x100;
+    int16_t  speed_i_term_deg_x100;
     int16_t  pitch_meas_deg_x100;
     int16_t  pitch_rate_dps_x100;
     int16_t  speed_target_radps_x1000;
     int16_t  speed_meas_radps_x1000;
+    int16_t  attitude_p_term_ma;
+    int16_t  attitude_d_term_ma;
     int16_t  iq_cmd_ma;
     int16_t  iq_cmd_clamped_ma;
-    int16_t  wheel_vel_l_x1000;
-    int16_t  wheel_vel_r_x1000;
+    int16_t  speed_output_limit_deg_x100;
+    int16_t  attitude_output_limit_ma;
     int16_t  iq_l_x1000;
     int16_t  iq_r_x1000;
     int16_t  uq_l_mv;

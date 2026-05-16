@@ -75,10 +75,15 @@ static float g_speed_loop_integral = 0.0f;
 static volatile App_AttitudeTelemetry_t g_attitude_telemetry;
 
 static float App_Attitude_ClampFloat(float value, float min_value, float max_value);
-static float App_Attitude_CalculatePitchTarget(float wheel_speed_radps, float dt);
+static float App_Attitude_CalculatePitchTarget(float wheel_speed_radps,
+                                               float dt,
+                                               float *pitch_target_p,
+                                               float *pitch_target_i);
 static float App_Attitude_CalculateIqCommand(float pitch_target_rad,
                                              float pitch_rad,
                                              float pitch_rate_radps,
+                                             float *iq_cmd_p,
+                                             float *iq_cmd_d,
                                              float *iq_cmd_clamped);
 
 /**
@@ -140,10 +145,16 @@ uint8_t App_Attitude_SetControlEnabled(uint8_t enable)
     if (enable == 0U) {
         __disable_irq();
         g_attitude_telemetry.pitch_target_rad = 0.0f;
+        g_attitude_telemetry.speed_p_term_rad = 0.0f;
+        g_attitude_telemetry.speed_i_term_rad = 0.0f;
         g_attitude_telemetry.speed_target_radps = APP_SPEED_TARGET_RADPS;
         g_attitude_telemetry.speed_meas_radps = 0.0f;
+        g_attitude_telemetry.attitude_p_term_a = 0.0f;
+        g_attitude_telemetry.attitude_d_term_a = 0.0f;
         g_attitude_telemetry.iq_cmd_a = 0.0f;
         g_attitude_telemetry.iq_cmd_clamped_a = 0.0f;
+        g_attitude_telemetry.speed_output_limit_rad = APP_SPEED_PITCH_LIMIT_RAD;
+        g_attitude_telemetry.attitude_output_limit_a = APP_ATTITUDE_IQ_LIMIT_A;
         __enable_irq();
         App_FOC_SetIqTarget(0.0f, 0.0f);
     }
@@ -323,10 +334,14 @@ void App_Attitude_Loop(void)
     static float wheel_speed_radps = 0.0f;
     float speed_meas_radps = 0.0f;
     float speed_error_radps;
-    float speed_i_term_rad;
+    float speed_i_integral_term_rad;
     float pitch_target_cmd_rad;
     float pitch_meas_rad;
     float pitch_rate_meas_radps;
+    float speed_p_term_rad;
+    float speed_i_term_rad;
+    float attitude_p_term_a;
+    float attitude_d_term_a;
     float iq_cmd_a;
     float iq_cmd_clamped_a;
 
@@ -342,12 +357,18 @@ void App_Attitude_Loop(void)
         g_speed_loop_integral = 0.0f;
         __disable_irq();
         g_attitude_telemetry.pitch_target_rad = 0.0f;
+        g_attitude_telemetry.speed_p_term_rad = 0.0f;
+        g_attitude_telemetry.speed_i_term_rad = 0.0f;
         g_attitude_telemetry.pitch_meas_rad = pitch_meas_rad;
         g_attitude_telemetry.pitch_rate_meas_radps = pitch_rate_meas_radps;
         g_attitude_telemetry.speed_target_radps = APP_SPEED_TARGET_RADPS;
         g_attitude_telemetry.speed_meas_radps = -wheel_speed_radps;
+        g_attitude_telemetry.attitude_p_term_a = 0.0f;
+        g_attitude_telemetry.attitude_d_term_a = 0.0f;
         g_attitude_telemetry.iq_cmd_a = 0.0f;
         g_attitude_telemetry.iq_cmd_clamped_a = 0.0f;
+        g_attitude_telemetry.speed_output_limit_rad = APP_SPEED_PITCH_LIMIT_RAD;
+        g_attitude_telemetry.attitude_output_limit_a = APP_ATTITUDE_IQ_LIMIT_A;
         __enable_irq();
         App_FOC_SetIqTarget(0.0f, 0.0f);
         return;
@@ -359,28 +380,42 @@ void App_Attitude_Loop(void)
         wheel_speed_radps = App_FOC_GetAverageWheelSpeedRadps();
         speed_meas_radps = -wheel_speed_radps;
         pitch_target_rad = App_Attitude_CalculatePitchTarget(speed_meas_radps,
-                                                             APP_ATTITUDE_DT_SEC * 10.0f);
+                                                             APP_ATTITUDE_DT_SEC * 10.0f,
+                                                             &speed_p_term_rad,
+                                                             &speed_i_term_rad);
 
     } else {
         speed_meas_radps = -wheel_speed_radps;
     }
 
     speed_error_radps = APP_SPEED_TARGET_RADPS - speed_meas_radps;
-    speed_i_term_rad = APP_SPEED_KI_RAD_PER_RAD * g_speed_loop_integral;
+    speed_i_integral_term_rad = APP_SPEED_KI_RAD_PER_RAD * g_speed_loop_integral;
+    if (SpeedPID_Count != 0U) {
+        speed_p_term_rad = APP_SPEED_KP_RAD_PER_RADPS * speed_error_radps;
+        speed_i_term_rad = speed_i_integral_term_rad;
+    }
     pitch_target_cmd_rad = pitch_target_rad + 0.0f;
 
     iq_cmd_a = App_Attitude_CalculateIqCommand(pitch_target_cmd_rad,
                                                pitch_meas_rad,
                                                pitch_rate_meas_radps,
+                                               &attitude_p_term_a,
+                                               &attitude_d_term_a,
                                                &iq_cmd_clamped_a);
     __disable_irq();
     g_attitude_telemetry.pitch_target_rad = pitch_target_cmd_rad;
+    g_attitude_telemetry.speed_p_term_rad = speed_p_term_rad;
+    g_attitude_telemetry.speed_i_term_rad = speed_i_term_rad;
     g_attitude_telemetry.pitch_meas_rad = pitch_meas_rad;
     g_attitude_telemetry.pitch_rate_meas_radps = pitch_rate_meas_radps;
     g_attitude_telemetry.speed_target_radps = APP_SPEED_TARGET_RADPS;
     g_attitude_telemetry.speed_meas_radps = speed_meas_radps;
+    g_attitude_telemetry.attitude_p_term_a = attitude_p_term_a;
+    g_attitude_telemetry.attitude_d_term_a = attitude_d_term_a;
     g_attitude_telemetry.iq_cmd_a = iq_cmd_a;
     g_attitude_telemetry.iq_cmd_clamped_a = iq_cmd_clamped_a;
+    g_attitude_telemetry.speed_output_limit_rad = APP_SPEED_PITCH_LIMIT_RAD;
+    g_attitude_telemetry.attitude_output_limit_a = APP_ATTITUDE_IQ_LIMIT_A;
     __enable_irq();
     App_FOC_SetIqTarget(iq_cmd_clamped_a, -iq_cmd_clamped_a);
 
@@ -423,7 +458,7 @@ void App_Attitude_Loop(void)
                      wheel_speed_radps,
                      speed_error_radps,
                      g_speed_loop_integral,
-                     speed_i_term_rad,
+                     speed_i_integral_term_rad,
                      iq_cmd_clamped_a,
                      g_estimator.kalman_pitch.acc_norm);
 #endif
@@ -479,27 +514,38 @@ static float App_Attitude_ClampFloat(float value, float min_value, float max_val
     return value;
 }
 
-static float App_Attitude_CalculatePitchTarget(float wheel_speed_radps, float dt)
+static float App_Attitude_CalculatePitchTarget(float wheel_speed_radps,
+                                               float dt,
+                                               float *pitch_target_p,
+                                               float *pitch_target_i)
 {
     float speed_error = APP_SPEED_TARGET_RADPS - wheel_speed_radps;
     float pitch_target;
-    float speed_i_term=0;
+    float speed_i_term = 0.0f;
+    float pitch_target_p_term;
+
     if (APP_SPEED_KI_RAD_PER_RAD != 0.0f) {
-    g_speed_loop_integral += speed_error * dt;
+        g_speed_loop_integral += speed_error * dt;
 
-    speed_i_term = APP_SPEED_KI_RAD_PER_RAD * g_speed_loop_integral;
-    speed_i_term = App_Attitude_ClampFloat(speed_i_term,
-                                        -APP_SPEED_PITCH_LIMIT_RAD,
-                                        APP_SPEED_PITCH_LIMIT_RAD);
-
-    
+        speed_i_term = APP_SPEED_KI_RAD_PER_RAD * g_speed_loop_integral;
+        speed_i_term = App_Attitude_ClampFloat(speed_i_term,
+                                               -APP_SPEED_PITCH_LIMIT_RAD,
+                                               APP_SPEED_PITCH_LIMIT_RAD);
 
     } else {
         g_speed_loop_integral = 0.0f;
     }
 
-    pitch_target = APP_SPEED_KP_RAD_PER_RADPS * speed_error + speed_i_term;
+    pitch_target_p_term = APP_SPEED_KP_RAD_PER_RADPS * speed_error;
+    pitch_target = pitch_target_p_term + speed_i_term;
     pitch_target *= APP_SPEED_LOOP_SIGN;
+
+    if (pitch_target_p != NULL) {
+        *pitch_target_p = pitch_target_p_term * APP_SPEED_LOOP_SIGN;
+    }
+    if (pitch_target_i != NULL) {
+        *pitch_target_i = speed_i_term * APP_SPEED_LOOP_SIGN;
+    }
 
     return App_Attitude_ClampFloat(pitch_target,
                                    -APP_SPEED_PITCH_LIMIT_RAD,
@@ -509,28 +555,47 @@ static float App_Attitude_CalculatePitchTarget(float wheel_speed_radps, float dt
 static float App_Attitude_CalculateIqCommand(float pitch_target_rad,
                                              float pitch_rad,
                                              float pitch_rate_radps,
+                                             float *iq_cmd_p,
+                                             float *iq_cmd_d,
                                              float *iq_cmd_clamped)
 {
     float pitch_error = pitch_target_rad - pitch_rad;
     float pitch_rate_error = APP_ATTITUDE_PITCH_RATE_TARGET_RADPS - pitch_rate_radps;
     float iq_cmd;
     float iq_cmd_limited;
+    float iq_cmd_p_term;
+    float iq_cmd_d_term;
 
     if (fabsf(pitch_rad) > APP_ATTITUDE_SHUTDOWN_RAD) {
         g_speed_loop_integral = 0.0f;
+        if (iq_cmd_p != NULL) {
+            *iq_cmd_p = 0.0f;
+        }
+        if (iq_cmd_d != NULL) {
+            *iq_cmd_d = 0.0f;
+        }
         if (iq_cmd_clamped != NULL) {
             *iq_cmd_clamped = 0.0f;
         }
         return 0.0f;
     }
 
-    iq_cmd = (APP_ATTITUDE_KP_A_PER_RAD * pitch_error) +
-             (APP_ATTITUDE_KD_A_PER_RADPS * pitch_rate_error);
+    iq_cmd_p_term = APP_ATTITUDE_KP_A_PER_RAD * pitch_error;
+    iq_cmd_d_term = APP_ATTITUDE_KD_A_PER_RADPS * pitch_rate_error;
+    iq_cmd = iq_cmd_p_term + iq_cmd_d_term;
     iq_cmd *= APP_ATTITUDE_IQ_SIGN;
+    iq_cmd_p_term *= APP_ATTITUDE_IQ_SIGN;
+    iq_cmd_d_term *= APP_ATTITUDE_IQ_SIGN;
 
     iq_cmd_limited = App_Attitude_ClampFloat(iq_cmd,
                                              -APP_ATTITUDE_IQ_LIMIT_A,
                                              APP_ATTITUDE_IQ_LIMIT_A);
+    if (iq_cmd_p != NULL) {
+        *iq_cmd_p = iq_cmd_p_term;
+    }
+    if (iq_cmd_d != NULL) {
+        *iq_cmd_d = iq_cmd_d_term;
+    }
     if (iq_cmd_clamped != NULL) {
         *iq_cmd_clamped = iq_cmd_limited;
     }

@@ -68,6 +68,7 @@ static void process_pid_update_motor_holdoff(void)
         if (pid_update_fastlog_pending)
         {
     #if PID_FAST_LOG_ENABLE
+            App_SetFastLogSource(FASTLOG_SOURCE_LEFT);
             if (App_TryArmFastLog()) {
                 USB_Debug_Printf("# FASTLOG auto-armed after command update, cap=%u\r\n",
                                  (unsigned int)PID_FAST_LOG_CAPACITY);
@@ -136,6 +137,7 @@ static void apply_target_and_ack(float target)
 {
     TUNE_TARGET = target;
 #if PID_FAST_LOG_ENABLE
+    App_SetFastLogSource(FASTLOG_SOURCE_LEFT);
     if (App_TryArmFastLog()) {
         USB_Debug_Printf("# FASTLOG auto-armed after target update, cap=%u\r\n",
                          (unsigned int)PID_FAST_LOG_CAPACITY);
@@ -246,8 +248,22 @@ static void handle_one_command(const char *cmd)
     if (strncmp(cmd, "fastlog:arm", 11) == 0)
     {
 #if PID_FAST_LOG_ENABLE
+        uint8_t source = FASTLOG_SOURCE_LEFT;
+        const char *arg = cmd + 11;
+        while (*arg == ' ' || *arg == '\t') {
+            arg++;
+        }
+        if (*arg == 'R' || *arg == 'r') {
+            source = FASTLOG_SOURCE_RIGHT;
+        } else if (*arg == 'L' || *arg == 'l') {
+            source = FASTLOG_SOURCE_LEFT;
+        }
+
+        App_SetFastLogSource(source);
         if (App_TryArmFastLog()) {
-            USB_Debug_Printf("# FASTLOG armed, cap=%u\r\n", (unsigned int)PID_FAST_LOG_CAPACITY);
+            USB_Debug_Printf("# FASTLOG armed, cap=%u source=%c\r\n",
+                             (unsigned int)PID_FAST_LOG_CAPACITY,
+                             (source == FASTLOG_SOURCE_RIGHT) ? 'R' : 'L');
         } else {
             USB_Debug_Printf("# FASTLOG arm rejected: previous capture not exported yet\r\n");
         }
@@ -278,15 +294,17 @@ static void handle_one_command(const char *cmd)
         uint8_t done = 0U;
         uint32_t capture_id = 0U;
         uint8_t blocked = 0U;
+        uint8_t source = 0U;
 
-        App_GetFastLogStatus(&sample_count, &armed, &done, &capture_id, &blocked);
-        USB_Debug_Printf("# FASTLOG status: arm=%u done=%u count=%u/%u capture=%lu blocked=%u\r\n",
+        App_GetFastLogStatus(&sample_count, &armed, &done, &capture_id, &blocked, &source);
+        USB_Debug_Printf("# FASTLOG status: arm=%u done=%u count=%u/%u capture=%lu blocked=%u source=%c\r\n",
                          (unsigned int)armed,
                          (unsigned int)done,
                          (unsigned int)sample_count,
                          (unsigned int)PID_FAST_LOG_CAPACITY,
                          (unsigned long)capture_id,
-                         (unsigned int)blocked);
+                         (unsigned int)blocked,
+                         (source == FASTLOG_SOURCE_RIGHT) ? 'R' : 'L');
 #else
         USB_Debug_Printf("# FASTLOG disabled (PID_FAST_LOG_ENABLE=0)\r\n");
 #endif
@@ -389,7 +407,7 @@ static void handle_one_command(const char *cmd)
     }
 
     USB_Debug_Printf("Unknown cmd: %s\r\n", cmd);
-    USB_Debug_Printf("Cmd list: tgt:<value> | SET/PID tunes current PID L/R same: SET P:x I:y D:z [L:l] | PID x y z [l] | STATUS | PID MODE | PID RESET | fastlog:arm|stop|status\r\n");
+    USB_Debug_Printf("Cmd list: tgt:<value> | SET/PID tunes current PID L/R same: SET P:x I:y D:z [L:l] | PID x y z [l] | STATUS | PID MODE | PID RESET | fastlog:arm [L|R]|stop|status\r\n");
 }
 
 /* 诊断计数：记录 CDC_Transmit_FS 返回 USBD_BUSY 的次数 */
