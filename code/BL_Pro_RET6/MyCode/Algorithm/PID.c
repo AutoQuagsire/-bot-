@@ -282,6 +282,14 @@ void PID_CalculateTest(PID_t *pid, float target, float measure)
     pid->output = (pid->Kp * error) +
                   (pid->Ki * pid->error_integral) +
                   (pid->Kd * derivative);
+
+        /* PI 总输出限幅 */
+    if (pid->output > pid->output_limit) {
+        pid->output = pid->output_limit;
+    } else if (pid->output < -pid->output_limit) {
+        pid->output = -pid->output_limit;
+    }
+    
 }
 
 

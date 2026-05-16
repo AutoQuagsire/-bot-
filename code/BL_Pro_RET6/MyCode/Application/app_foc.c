@@ -10,6 +10,7 @@
 #include "BLDCMotor.h"
 #include "stm32g4xx_hal.h"
 #include "sys.h"
+#include "app_attitude.h"
 #include <math.h>
 #include <stdint.h>
 #include "PID.h"
@@ -27,6 +28,12 @@ static uint8_t App_InitBusVoltage(void);
 static uint8_t App_InitMotor1Stack(void);
 static uint8_t App_InitMotor2Stack(void);
 static uint8_t App_InitFOCAlgorithm(void);
+static void App_FOC_ForcePowerStageOff(void);
+
+static volatile uint8_t g_foc_stack_ready = 0U;
+static volatile uint8_t g_bus_telemetry_ready = 0U;
+static volatile uint8_t g_foc_power_stage_enabled = 0U;
+static uint32_t         g_last_bus_voltage_sample_tick_ms = 0U;
 
 
 
@@ -43,6 +50,9 @@ static uint8_t App_InitFOCAlgorithm(void);
  */
 uint8_t App_FOCStack_Init(void)
 {
+    g_foc_stack_ready = 0U;
+    g_bus_telemetry_ready = 0U;
+
     if(!App_InitBusVoltage()) {
         USB_Debug_Printf("Bus voltage init failed\r\n");
         return 0U;
@@ -61,6 +71,9 @@ uint8_t App_FOCStack_Init(void)
         USB_Debug_Printf("FOC algorithm init failed\r\n");
         return 0U;
     }
+    g_foc_stack_ready = 1U;
+    g_last_bus_voltage_sample_tick_ms = HAL_GetTick();
+    g_bus_telemetry_ready = 1U;
     USB_Debug_Printf("FOC stack init ok\r\n");
     return 1U;
 }
@@ -116,9 +129,11 @@ LowPassFilter_t         g_current_lpf2;
 static uint32_t         g_last_loop_tick_ms = 0U;
 static uint32_t         g_last_print_tick_ms = 0U;
 static uint32_t         g_last_while_debug_tick_ms = 0U;
-static uint32_t         g_last_bus_voltage_sample_tick_ms = 0U;
 static volatile CurrentLoopDebugSnapshot_t g_current_loop_debug1;
 static volatile CurrentLoopDebugSnapshot_t g_current_loop_debug2;
+static volatile uint8_t g_foc_control_it_enabled = 0U;
+static volatile uint32_t g_foc_loop_count = 0U;
+static volatile uint32_t g_foc_last_loop_tick_ms = 0U;
 static uint8_t g_current_i_unload_limit_ticks1 = 0U;
 static uint8_t g_current_i_unload_limit_ticks2 = 0U;
 static float g_current_iq_ref1 = 0.0f;
@@ -178,7 +193,7 @@ static void App_ServiceBusVoltageSample(void)
 
 
 PID_t Left_Velocity_FOC_PID;
-float Left_Target = 0.3f;
+static float g_speed_target_radps = 0.3f;
 volatile uint8_t g_current_pid_mode = 0U; /* 0=CurrentLoop_FFPI_V1, 1=Pure PI compare */
 
 float g_speed_fault2 = 0.0f;
@@ -207,6 +222,15 @@ float g_speed_fault1 = 0.0f;
 #define APP_CURRENT_KP             (2.5)
 #define APP_CURRENT_KI             (0.2f)
 #define APP_CURRENT_KD             (0.0f)
+
+#define APP_LEFT_WHEEL_SPEED_SIGN   (1.0f)
+#define APP_RIGHT_WHEEL_SPEED_SIGN  (-1.0f)
+
+static volatile float g_iq_target_left = APP_CURRENT_TARGET_A;
+static volatile float g_iq_target_right = APP_CURRENT_TARGET_A;
+
+extern float vel_windowed_f1;
+extern float vel_windowed_f2;
 
 #define APP_CURRENT_I_LIMIT          (5.0f)
 #define APP_CURRENT_PURE_PI_I_LIMIT  (6.0f)
@@ -732,13 +756,154 @@ void App_ResetCurrentPIDs(void)
     g_current_i_unload_limit_ticks1 = 0U;
     g_current_i_unload_limit_ticks2 = 0U;
 
-    g_current_iq_ref1 = Left_Target;
-    g_current_iq_ref2 = Left_Target;
+    g_current_iq_ref1 = g_iq_target_left;
+    g_current_iq_ref2 = g_iq_target_right;
 
     __enable_irq();
 }
 
+void App_FOC_SetIqTarget(float left_iq, float right_iq)
+{
+    __disable_irq();
+    g_iq_target_left = left_iq;
+    g_iq_target_right = right_iq;
+    __enable_irq();
+}
 
+float App_FOC_GetAverageWheelSpeedRadps(void)
+{
+    float left_speed;
+    float right_speed;
+
+    __disable_irq();
+    left_speed = vel_windowed_f1;
+    right_speed = vel_windowed_f2;
+    __enable_irq();
+
+    return 0.5f * ((APP_LEFT_WHEEL_SPEED_SIGN * left_speed) +
+                   (APP_RIGHT_WHEEL_SPEED_SIGN * right_speed));
+}
+
+float App_FOC_GetBusVoltageFiltered(void)
+{
+    return g_bus_voltage_filtered;
+}
+
+uint8_t App_FOC_BusTelemetryInit(void)
+{
+    if (g_foc_stack_ready != 0U) {
+        g_last_bus_voltage_sample_tick_ms = HAL_GetTick();
+        g_bus_telemetry_ready = 1U;
+        return 1U;
+    }
+
+    g_bus_telemetry_ready = 0U;
+
+    if (!App_InitBusVoltage()) {
+        return 0U;
+    }
+
+    g_last_bus_voltage_sample_tick_ms = HAL_GetTick();
+    g_bus_telemetry_ready = 1U;
+    return 1U;
+}
+
+void App_FOC_BusTelemetryService(void)
+{
+    uint32_t now_ms;
+
+    if (g_bus_telemetry_ready == 0U) {
+        return;
+    }
+
+    now_ms = HAL_GetTick();
+#if APP_BUS_VOLTAGE_ENABLE
+    if ((now_ms - g_last_bus_voltage_sample_tick_ms) >= APP_BUS_VOLTAGE_SAMPLE_PERIOD_MS) {
+        g_last_bus_voltage_sample_tick_ms = now_ms;
+        App_ServiceBusVoltageSample();
+    }
+#endif
+}
+
+void App_FOC_GetTelemetry(App_FOCTelemetry_t *telemetry)
+{
+    App_FOCTelemetry_t snapshot;
+    uint8_t bus_valid;
+    uint8_t stack_ready;
+    uint8_t control_it_enabled;
+    uint32_t loop_count;
+    uint32_t last_loop_tick_ms;
+    float speed_fault_left;
+    float speed_fault_right;
+    uint16_t flags = 0U;
+    uint32_t now_ms;
+
+    if (telemetry == NULL) {
+        return;
+    }
+
+    snapshot.wheel_vel_left_radps = 0.0f;
+    snapshot.wheel_vel_right_radps = 0.0f;
+    snapshot.filtered_iq_left_a = 0.0f;
+    snapshot.filtered_iq_right_a = 0.0f;
+    snapshot.uq_left_v = 0.0f;
+    snapshot.uq_right_v = 0.0f;
+    snapshot.bus_voltage_v = 0.0f;
+    snapshot.status_flags = 0U;
+
+    __disable_irq();
+    snapshot.wheel_vel_left_radps = vel_windowed_f1;
+    snapshot.wheel_vel_right_radps = vel_windowed_f2;
+    snapshot.filtered_iq_left_a = g_current_loop_debug1.filtered_iq;
+    snapshot.filtered_iq_right_a = g_current_loop_debug2.filtered_iq;
+    snapshot.uq_left_v = g_current_loop_debug1.uq_final;
+    snapshot.uq_right_v = g_current_loop_debug2.uq_final;
+    snapshot.bus_voltage_v = g_bus_voltage_filtered;
+    bus_valid = g_bus_voltage_valid;
+    stack_ready = g_foc_stack_ready;
+    control_it_enabled = g_foc_control_it_enabled;
+    loop_count = g_foc_loop_count;
+    last_loop_tick_ms = g_foc_last_loop_tick_ms;
+    speed_fault_left = g_speed_fault1;
+    speed_fault_right = g_speed_fault2;
+    __enable_irq();
+
+    now_ms = HAL_GetTick();
+
+    if (speed_fault_left > 0.5f) {
+        flags |= APP_FOC_STATUS_FLAG_SPEED_FAULT_L;
+    }
+    if (speed_fault_right > 0.5f) {
+        flags |= APP_FOC_STATUS_FLAG_SPEED_FAULT_R;
+    }
+    if (stack_ready != 0U) {
+        flags |= APP_FOC_STATUS_FLAG_STACK_READY;
+    }
+    if (control_it_enabled != 0U) {
+        flags |= APP_FOC_STATUS_FLAG_CONTROL_IT_ENABLED;
+    }
+    if (bus_valid != 0U) {
+        flags |= APP_FOC_STATUS_FLAG_BUS_VALID;
+    }
+    if ((loop_count > 0U) && ((now_ms - last_loop_tick_ms) <= 100U)) {
+        flags |= APP_FOC_STATUS_FLAG_CURRENT_LOOP_ACTIVE;
+    }
+#if APP_SPEED_LOOP_ENABLE
+    flags |= APP_FOC_STATUS_FLAG_SPEED_LOOP_ENABLED;
+#endif
+#if APP_CURRENT_LOOP_ENABLE
+    flags |= APP_FOC_STATUS_FLAG_CURRENT_LOOP_ENABLED;
+#endif
+    if (g_foc_power_stage_enabled == 0U) {
+        flags |= APP_FOC_STATUS_FLAG_POWER_STAGE_OFF;
+    }
+    if (App_Attitude_IsControlEnabled() != 0U) {
+        flags |= APP_FOC_STATUS_FLAG_ATTITUDE_CONTROL_ON;
+    }
+
+    snapshot.status_flags = flags;
+    *telemetry = snapshot;
+}
 
 
 
@@ -1090,7 +1255,7 @@ void App_Loop(void)
     float elec_angle = g_motor1.electrical_angle;
     float vel = Sensor_GetVelocityRaw(&g_sensor1);
     float uq_cmd = APP_LOOP_TEST_UQ_V;
-    float vel_target = Left_Target;
+    float vel_target = g_speed_target_radps;
     float vel_error = vel_target - vel;
 
 #if APP_MATRIX_ENABLE
@@ -1142,11 +1307,67 @@ void App_Loop(void)
 /* 启动 FOC 控制定时器中断 */
 void App_FOCControlIT_Enable(void)
 {
-    HAL_TIM_Base_Start_IT(&htim5);
+    App_FOC_ForcePowerStageOff();
+
+    if (HAL_TIM_Base_Start_IT(&htim5) == HAL_OK) {
+        g_foc_control_it_enabled = 1U;
+    } else {
+        g_foc_control_it_enabled = 0U;
+    }
 }
 
 
 /* 速度环调试变量 */
+uint8_t App_FOC_SetPowerStageEnabled(uint8_t enable)
+{
+    uint8_t should_restore_tim5_irq = 0U;
+
+    if (enable > 1U) {
+        return 0U;
+    }
+
+    if (enable != 0U) {
+        if ((g_foc_stack_ready == 0U) ||
+            (g_foc_control_it_enabled == 0U) ||
+            (g_bus_voltage_valid == 0U)) {
+            return 0U;
+        }
+    }
+
+    if (g_foc_control_it_enabled != 0U) {
+        HAL_NVIC_DisableIRQ(TIM5_IRQn);
+        should_restore_tim5_irq = 1U;
+    }
+
+    App_FOC_SetIqTarget(0.0f, 0.0f);
+    App_ResetSpeedPIDs();
+    App_ResetCurrentPIDs();
+
+    if (enable == 0U) {
+        (void)App_Attitude_SetControlEnabled(0U);
+        App_FOC_ForcePowerStageOff();
+    } else {
+#if LEFT_MOTOR_ENABLE
+        FOCMotor_enable(&g_motor1);
+#endif
+#if RIGHT_MOTOR_ENABLE
+        FOCMotor_enable(&g_motor2);
+#endif
+        g_foc_power_stage_enabled = 1U;
+    }
+
+    if (should_restore_tim5_irq != 0U) {
+        HAL_NVIC_EnableIRQ(TIM5_IRQn);
+    }
+
+    return 1U;
+}
+
+uint8_t App_FOC_IsPowerStageEnabled(void)
+{
+    return g_foc_power_stage_enabled;
+}
+
 float vel1 = 0;
 float vel_windowed1 = 0;
 float vel_windowed_f1 = 0;
@@ -1439,6 +1660,13 @@ static uint8_t loopFOC(void)
 
         float Uq_cmd1 = 0.0f;
         float Uq_cmd2 = 0.0f;
+        float iq_target_left;
+        float iq_target_right;
+
+        __disable_irq();
+        iq_target_left = g_iq_target_left;
+        iq_target_right = g_iq_target_right;
+        __enable_irq();
 
 #if LEFT_MOTOR_ENABLE && APP_CURRENT_LOOP_ENABLE
         Left_Current = CurrentSense_GetPhaseCurrent(&g_current_sense1);
@@ -1448,7 +1676,7 @@ static uint8_t loopFOC(void)
         if (g_current_pid_mode == 0U) {
             Uq_cmd1 = App_CurrentLoopComputeUq(&g_motor1,
                                                &g_current_pid1,
-                                               Left_Target,
+                                               iq_target_left,
                                                Left_FilteredIq,
                                                Left_RawIq,
                                                1U,
@@ -1458,7 +1686,7 @@ static uint8_t loopFOC(void)
         } else {
             Uq_cmd1 = App_CurrentLoopComputeUq(&g_motor1,
                                                &g_current_pid1_Common,
-                                               Left_Target,
+                                               iq_target_left,
                                                Left_FilteredIq,
                                                Left_RawIq,
                                                0U,
@@ -1476,7 +1704,7 @@ static uint8_t loopFOC(void)
         if (g_current_pid_mode == 0U) {
             Uq_cmd2 = App_CurrentLoopComputeUq(&g_motor2,
                                                &g_current_pid2,
-                                               Left_Target,
+                                               iq_target_right,
                                                Right_FilteredIq,
                                                Right_RawIq,
                                                1U,
@@ -1486,7 +1714,7 @@ static uint8_t loopFOC(void)
         } else {
             Uq_cmd2 = App_CurrentLoopComputeUq(&g_motor2,
                                                &g_current_pid2_Common,
-                                               Left_Target,
+                                               iq_target_right,
                                                Right_FilteredIq,
                                                Right_RawIq,
                                                0U,
@@ -1496,8 +1724,13 @@ static uint8_t loopFOC(void)
         }
 #endif
 
-        Motor_SetPhaseVoltageQBySinCos(&g_motor1, Uq_cmd1, sin_e1, cos_e1);
-        Motor_SetPhaseVoltageQBySinCos(&g_motor2, Uq_cmd2, sin_e2, cos_e2);
+        if (g_foc_power_stage_enabled != 0U) {
+            Motor_SetPhaseVoltageQBySinCos(&g_motor1, Uq_cmd1, sin_e1, cos_e1);
+            Motor_SetPhaseVoltageQBySinCos(&g_motor2, Uq_cmd2, sin_e2, cos_e2);
+        } else {
+            Motor_SetPhaseVoltageQBySinCos(&g_motor1, 0.0f, sin_e1, cos_e1);
+            Motor_SetPhaseVoltageQBySinCos(&g_motor2, 0.0f, sin_e2, cos_e2);
+        }
 
         /* 当前 FastLog 记录左电机电流环数据 */
         fastlog_push(&g_motor1, &g_current_loop_debug1);
@@ -1512,16 +1745,16 @@ static uint8_t loopFOC(void)
  */
 static void move(void)
 {
-    float vel_target1 = Left_Target;
-    float vel_target2 = Left_Target;
+    float vel_target1 = g_speed_target_radps;
+    float vel_target2 = g_speed_target_radps;
 
     vel1 = Sensor_GetVelocityRaw(&g_sensor1);
     vel_windowed1 = Sensor_GetVelocityWindowed(&g_sensor1);
-    vel_windowed_f1 = LowPassFilter_Update(&g_speed_lpf1, vel1);
+    vel_windowed_f1 = LowPassFilter_Update(&g_speed_lpf1, vel_windowed1);
 
     vel2 = Sensor_GetVelocityRaw(&g_sensor2);
     vel_windowed2 = Sensor_GetVelocityWindowed(&g_sensor2);
-    vel_windowed_f2 = LowPassFilter_Update(&g_speed_lpf2, vel2);
+    vel_windowed_f2 = LowPassFilter_Update(&g_speed_lpf2, vel_windowed2);
 
 #if APP_SPEED_LOOP_ENABLE
     PID_Calculate(&g_speed_pid1, vel_target1, vel_windowed_f1, 0U);
@@ -1558,7 +1791,10 @@ void App_LoopForIT(void)
         HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
         return;
     }
-  
+
+    g_foc_loop_count++;
+    g_foc_last_loop_tick_ms = HAL_GetTick();
+
     g_move_downsample_cnt++;
     if (g_move_downsample_cnt >= APP_MOVE_DOWNSAMPLE) {
         g_move_downsample_cnt = 0U;
@@ -1826,7 +2062,7 @@ static uint8_t App_InitFOCAlgorithm(void)
                             APP_SPEED_I_SEP_RATIO);
 
         Left_Velocity_FOC_PID = g_speed_pid1;
-        Left_Target = 0.3f;
+        g_speed_target_radps = 0.3f;
         g_speed_fault1 = 0U;
         g_speed_fault2 = 0U;
 
@@ -1884,3 +2120,14 @@ static uint8_t App_InitFOCAlgorithm(void)
         return 1U;
 }
 
+static void App_FOC_ForcePowerStageOff(void)
+{
+#if LEFT_MOTOR_ENABLE
+    FOCMotor_disable(&g_motor1);
+#endif
+#if RIGHT_MOTOR_ENABLE
+    FOCMotor_disable(&g_motor2);
+#endif
+
+    g_foc_power_stage_enabled = 0U;
+}

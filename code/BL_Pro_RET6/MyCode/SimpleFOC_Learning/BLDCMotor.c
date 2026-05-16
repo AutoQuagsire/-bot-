@@ -617,6 +617,8 @@ uint8_t Motor_CalibrateZeroElectricalAngle(Motor_t *motor,
                                            float align_angle,
                                            uint16_t settle_ms)
 {
+    uint8_t was_enabled;
+
     if (!motor || !motor->sensor || !motor->driver) {
         return 0U;
     }
@@ -628,6 +630,8 @@ uint8_t Motor_CalibrateZeroElectricalAngle(Motor_t *motor,
     if (!motor->driver->initialized) {
         return 0U;
     }
+
+    was_enabled = motor->state.enabled;
 
     /* 1. 使能电机 */
     FOCMotor_enable(motor);
@@ -678,6 +682,9 @@ uint8_t Motor_CalibrateZeroElectricalAngle(Motor_t *motor,
 
     /* 6. 校准完成后关闭 PWM 输出 */
     Driver_SetPwm(motor->driver, 0.0f, 0.0f, 0.0f);
+    if (was_enabled == 0U) {
+        FOCMotor_disable(motor);
+    }
 
     return 1U;
 }

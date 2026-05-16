@@ -30,6 +30,7 @@
 #include "app_attitude.h"
 #include "usb_debug.h"
 #include "icm42688p.h"
+#include "debug_link.h"
 
 /* USER CODE END Includes */
 
@@ -116,16 +117,16 @@ int main(void)
 
   App_Attitude_Init();
 
-  // HAL_Delay(500);
-  // if (!App_FOCStack_Init()) {
-  //     Error_Handler();
-  // }
-  // HAL_Delay(2000);
-  // if (!App_StartupCalibrate()) {
-  //     Error_Handler();
-  // }
-
-  // App_FOCControlIT_Enable();
+  DebugLink_Init();
+  if (!App_FOCStack_Init()) {
+      USB_Debug_Printf("FOC stack init failed, keep bus telemetry only\r\n");
+      (void)App_FOC_BusTelemetryInit();
+  } else {
+      if (!App_StartupCalibrate()) {
+          USB_Debug_Printf("FOC startup calibrate failed, keep stack init only\r\n");
+      }
+  }
+  App_FOCControlIT_Enable();
 
   /* USER CODE END 2 */
 
@@ -138,6 +139,35 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     App_Attitude_Loop();
+    App_FOC_BusTelemetryService();
+
+    /* 更新 DebugLink 状态快照 */
+    {
+        DebugLink_StatusSnapshot_t st;
+        App_AttitudeTelemetry_t att_telem;
+        App_FOCTelemetry_t foc_telem;
+        App_Attitude_GetTelemetry(&att_telem);
+        App_FOC_GetTelemetry(&foc_telem);
+        st.tick_ms                = HAL_GetTick();
+        st.pitch_target_deg_x100  = (int16_t)(att_telem.pitch_target_rad * 5729.578f);
+        st.pitch_meas_deg_x100    = (int16_t)(att_telem.pitch_meas_rad * 5729.578f);
+        st.pitch_rate_dps_x100    = (int16_t)(att_telem.pitch_rate_meas_radps * 5729.578f);
+        st.speed_target_radps_x1000 = (int16_t)(att_telem.speed_target_radps * 1000.0f);
+        st.speed_meas_radps_x1000 = (int16_t)(att_telem.speed_meas_radps * 1000.0f);
+        st.iq_cmd_ma              = (int16_t)(att_telem.iq_cmd_a * 1000.0f);
+        st.iq_cmd_clamped_ma      = (int16_t)(att_telem.iq_cmd_clamped_a * 1000.0f);
+        st.wheel_vel_l_x1000      = (int16_t)(foc_telem.wheel_vel_left_radps * 1000.0f);
+        st.wheel_vel_r_x1000      = (int16_t)(foc_telem.wheel_vel_right_radps * 1000.0f);
+        st.iq_l_x1000             = (int16_t)(foc_telem.filtered_iq_left_a * 1000.0f);
+        st.iq_r_x1000             = (int16_t)(foc_telem.filtered_iq_right_a * 1000.0f);
+        st.uq_l_mv                = (int16_t)(foc_telem.uq_left_v * 1000.0f);
+        st.uq_r_mv                = (int16_t)(foc_telem.uq_right_v * 1000.0f);
+        st.bus_mv                 = (uint16_t)(foc_telem.bus_voltage_v * 1000.0f);
+        st.fault_flags            = foc_telem.status_flags;
+        DebugLink_UpdateStatusSnapshot(&st);
+    }
+
+    DebugLink_Process();
 
     //DebuginWhile();
     //Process_USB_Command();

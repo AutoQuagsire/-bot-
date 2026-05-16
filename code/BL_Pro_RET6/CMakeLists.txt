@@ -47,6 +47,8 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     MyCode/System/usb_debug.c
+    MyCode/System/debug_link_protocol.c
+    MyCode/System/debug_link.c
     MyCode/System/sys.c
     MyCode/System/INT.c
 
