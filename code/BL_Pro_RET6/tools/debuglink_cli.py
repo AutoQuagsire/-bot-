@@ -20,6 +20,12 @@ import time
 
 import serial
 
+from debuglink_parser import (
+    parse_fastring_chunk,
+    parse_fastring_status,
+    parse_status_stream,
+)
+
 SOF0 = 0x5A
 SOF1 = 0xA5
 VERSION = 0x01
@@ -29,10 +35,20 @@ MSG_GET_DEVICE_INFO_REQ = 0x02
 MSG_STREAM_CONTROL_REQ = 0x10
 MSG_POWER_STAGE_REQ = 0x15
 MSG_ATTITUDE_CONTROL_REQ = 0x16
+MSG_FAST_RING_REQ = 0x17
 MSG_ACK = 0x80
 MSG_NACK = 0x81
 MSG_DEVICE_INFO_RSP = 0x82
 MSG_STATUS_STREAM = 0x90
+MSG_FAST_RING_DATA = 0x93
+
+OP_FASTRING_STATUS = 0x01
+OP_FASTRING_SNAPSHOT = 0x02
+OP_FASTRING_READ_CHUNK = 0x03
+
+FASTCAP_SOURCE_LEFT = 0
+FASTCAP_SOURCE_RIGHT = 1
+FASTRING_CHUNK_MAX = 8  # (240 - 12) // 26
 
 FOC_STATUS_FLAG_SPEED_FAULT_L = 1 << 0
 FOC_STATUS_FLAG_SPEED_FAULT_R = 1 << 1
@@ -419,30 +435,37 @@ def cmd_stream(ser: serial.Serial, rate: int, retries: int, retry_delay_ms: int)
             continue
 
         msg_type, _, payload = result
-        if msg_type != MSG_STATUS_STREAM or len(payload) < 42:
+        if msg_type != MSG_STATUS_STREAM:
             continue
 
-        tick_ms = struct.unpack_from("<I", payload, 0)[0]
-        pitch_target = struct.unpack_from("<h", payload, 4)[0] / 100.0
-        speed_p_term = struct.unpack_from("<h", payload, 6)[0] / 100.0
-        speed_i_term = struct.unpack_from("<h", payload, 8)[0] / 100.0
-        pitch_meas = struct.unpack_from("<h", payload, 10)[0] / 100.0
-        pitch_rate = struct.unpack_from("<h", payload, 12)[0] / 100.0
-        speed_target = struct.unpack_from("<h", payload, 14)[0] / 1000.0
-        speed_meas = struct.unpack_from("<h", payload, 16)[0] / 1000.0
-        attitude_p_term = struct.unpack_from("<h", payload, 18)[0] / 1000.0
-        attitude_d_term = struct.unpack_from("<h", payload, 20)[0] / 1000.0
-        iq_cmd = struct.unpack_from("<h", payload, 22)[0] / 1000.0
-        iq_cmd_clamped = struct.unpack_from("<h", payload, 24)[0] / 1000.0
-        speed_output_limit = struct.unpack_from("<h", payload, 26)[0] / 100.0
-        attitude_output_limit = struct.unpack_from("<h", payload, 28)[0] / 1000.0
-        iq_l = struct.unpack_from("<h", payload, 30)[0] / 1000.0
-        iq_r = struct.unpack_from("<h", payload, 32)[0] / 1000.0
-        uq_l = struct.unpack_from("<h", payload, 34)[0] / 1000.0
-        uq_r = struct.unpack_from("<h", payload, 36)[0] / 1000.0
-        bus_v = struct.unpack_from("<H", payload, 38)[0] / 1000.0
-        fault = struct.unpack_from("<H", payload, 40)[0]
-        fault_text = format_foc_status(fault)
+        try:
+            host_rx_time_ms = int(time.time() * 1000)
+            frame = parse_status_stream(payload, host_rx_time_ms)
+        except ValueError as e:
+            print(f"[WARN] stream parse error: {e}")
+            continue
+
+        tick_ms = frame.tick_ms
+        pitch_target = frame.pitch_target_deg
+        speed_p_term = frame.speed_p_term_deg
+        speed_i_term = frame.speed_i_term_deg
+        pitch_meas = frame.pitch_meas_deg
+        pitch_rate = frame.pitch_rate_dps
+        speed_target = frame.speed_target_radps
+        speed_meas = frame.speed_meas_radps
+        attitude_p_term = frame.attitude_p_iq_cmd_a
+        attitude_d_term = frame.attitude_d_iq_cmd_a
+        iq_cmd = frame.iq_cmd_a
+        iq_cmd_clamped = frame.iq_cmd_clamped_a
+        speed_output_limit = frame.speed_output_limit_deg
+        attitude_output_limit = frame.attitude_output_limit_a
+        iq_l = frame.iq_l_a
+        iq_r = frame.iq_r_a
+        uq_l = frame.uq_l_v
+        uq_r = frame.uq_r_v
+        bus_v = frame.bus_v
+        fault = frame.fault_flags
+        fault_text = frame.fault_labels
 
         print(
             f"t={tick_ms:>8} pitch_target={pitch_target:>+6.2f}deg "
@@ -559,6 +582,228 @@ def cmd_balance(ser: serial.Serial, enable: bool, retries: int, retry_delay_ms: 
     return False
 
 
+def cmd_fastring_status(ser: serial.Serial, retries: int, retry_delay_ms: int):
+    reader = FrameReader()
+    seq = 30
+    payload = struct.pack("<B", OP_FASTRING_STATUS)
+    frame = build_frame(MSG_FAST_RING_REQ, seq, payload)
+
+    print("[TX] FAST_RING_REQ STATUS")
+    result = send_frame_and_wait(
+        ser, reader, frame, "FASTRING_STATUS",
+        2.0, retries, retry_delay_ms,
+        accept_fn=lambda r: r[0] == MSG_FAST_RING_DATA,
+    )
+    if result is None:
+        return None
+
+    _, _, pld = result
+    try:
+        meta = parse_fastring_status(pld)
+    except ValueError as e:
+        print(f"[WARN] fastring status parse error: {e}")
+        return None
+
+    print("[RX] FAST_RING_DATA STATUS")
+    print(f"  total_count  = {meta.total_count}")
+    print(f"  capacity     = {meta.capacity}")
+    print(f"  head         = {meta.head}")
+    print(f"  write_seq    = {meta.write_seq}")
+    return meta
+
+
+def cmd_fastring_dump(
+    ser: serial.Serial,
+    out_file: str,
+    retries: int,
+    retry_delay_ms: int,
+):
+    snapshot_meta, all_samples = collect_fastring_snapshot(ser, retries, retry_delay_ms)
+    if snapshot_meta is None:
+        return False
+    try:
+        write_fastring_dual_csv(all_samples, out_file)
+        print(f"[DUMP] wrote {len(all_samples)} dual samples to {out_file}")
+        return True
+    except OSError as e:
+        print(f"[ERROR] cannot write {out_file}: {e}")
+        return False
+
+
+def cmd_fastring_split(
+    ser: serial.Serial,
+    left_out: str,
+    right_out: str,
+    retries: int,
+    retry_delay_ms: int,
+):
+    snapshot_meta, all_samples = collect_fastring_snapshot(ser, retries, retry_delay_ms)
+    if snapshot_meta is None:
+        return False
+
+    print(
+        f"[DUMP] synchronized FastRing snapshot write_seq={snapshot_meta.write_seq} "
+        f"samples={len(all_samples)}"
+    )
+    try:
+        write_fastring_side_csv(all_samples, FASTCAP_SOURCE_LEFT, snapshot_meta.write_seq, left_out)
+        write_fastring_side_csv(all_samples, FASTCAP_SOURCE_RIGHT, snapshot_meta.write_seq, right_out)
+        print(f"[DUMP] wrote {len(all_samples)} left samples to {left_out}")
+        print(f"[DUMP] wrote {len(all_samples)} right samples to {right_out}")
+        return True
+    except OSError as e:
+        print(f"[ERROR] cannot write synchronized split CSVs: {e}")
+        return False
+
+
+def cmd_fastring_side(
+    ser: serial.Serial,
+    side: str,
+    out_file: str,
+    retries: int,
+    retry_delay_ms: int,
+):
+    requested_source = FASTCAP_SOURCE_LEFT if side.upper() == "L" else FASTCAP_SOURCE_RIGHT
+    side_label = "R" if requested_source == FASTCAP_SOURCE_RIGHT else "L"
+    snapshot_meta, all_samples = collect_fastring_snapshot(ser, retries, retry_delay_ms)
+    if snapshot_meta is None:
+        return False
+
+    print(
+        f"[DUMP] FastRing snapshot write_seq={snapshot_meta.write_seq} "
+        f"motor={side_label} samples={len(all_samples)}"
+    )
+    try:
+        write_fastring_side_csv(all_samples, requested_source, snapshot_meta.write_seq, out_file)
+        print(f"[DUMP] wrote {len(all_samples)} samples to {out_file}")
+        return True
+    except OSError as e:
+        print(f"[ERROR] cannot write {out_file}: {e}")
+        return False
+
+
+def collect_fastring_snapshot(
+    ser: serial.Serial,
+    retries: int,
+    retry_delay_ms: int,
+):
+    reader = FrameReader()
+    seq_base = 31
+    live_meta = cmd_fastring_status(ser, retries, retry_delay_ms)
+    if live_meta is None:
+        return None, None
+    if live_meta.total_count == 0:
+        print("[WARN] FastRing is empty")
+        return None, None
+
+    payload = struct.pack("<B", OP_FASTRING_SNAPSHOT)
+    frame = build_frame(MSG_FAST_RING_REQ, seq_base & 0xFF, payload)
+    seq_base += 1
+
+    print("[TX] FAST_RING_REQ SNAPSHOT")
+    result = send_frame_and_wait(
+        ser, reader, frame, "FASTRING_SNAPSHOT",
+        2.0, retries, retry_delay_ms,
+        accept_fn=lambda r: r[0] == MSG_FAST_RING_DATA,
+    )
+    if result is None:
+        return None, None
+
+    _, _, pld = result
+    try:
+        meta = parse_fastring_status(pld)
+    except ValueError as e:
+        print(f"[WARN] fastring snapshot parse error: {e}")
+        return None, None
+
+    print(f"[DUMP] total_count={meta.total_count} capacity={meta.capacity} write_seq={meta.write_seq}")
+    all_samples = []
+    start_idx = 0
+    while start_idx < meta.total_count:
+        remaining = meta.total_count - start_idx
+        max_req = min(FASTRING_CHUNK_MAX, remaining)
+        payload = struct.pack("<BIHB", OP_FASTRING_READ_CHUNK, meta.write_seq, start_idx, max_req)
+        frame = build_frame(MSG_FAST_RING_REQ, seq_base & 0xFF, payload)
+        seq_base += 1
+
+        result = send_frame_and_wait(
+            ser, reader, frame, f"FASTRING_READ_CHUNK start={start_idx}",
+            2.0, retries, retry_delay_ms,
+            accept_fn=lambda r: r[0] == MSG_FAST_RING_DATA,
+        )
+        if result is None:
+            print(f"[WARN] FASTRING_READ_CHUNK start={start_idx} timed out, retrying ...")
+            continue
+
+        _, _, pld = result
+        try:
+            chunk_meta, chunk_samples = parse_fastring_chunk(pld)
+        except ValueError as e:
+            print(f"[WARN] fastring chunk parse error: {e}")
+            continue
+
+        if chunk_meta.op_echo != OP_FASTRING_READ_CHUNK:
+            print(f"[WARN] unexpected op_echo=0x{chunk_meta.op_echo:02X}, skipping")
+            continue
+        if chunk_meta.total_count != meta.total_count:
+            print(f"[WARN] total_count mismatch: got {chunk_meta.total_count}, expected {meta.total_count}, skipping")
+            continue
+        if chunk_meta.write_seq != meta.write_seq:
+            print(f"[WARN] write_seq changed: got {chunk_meta.write_seq}, expected {meta.write_seq}, skipping")
+            continue
+        if chunk_samples and chunk_samples[0].index != start_idx:
+            print(f"[WARN] start_idx mismatch: got {chunk_samples[0].index}, expected {start_idx}, skipping")
+            continue
+
+        sample_count = len(chunk_samples)
+        if sample_count == 0:
+            break
+
+        all_samples.extend(chunk_samples)
+        start_idx += sample_count
+
+    return meta, all_samples
+
+
+def write_fastring_dual_csv(all_samples, out_file: str) -> None:
+    with open(out_file, "w", newline="") as f:
+        f.write(
+            "idx,target_iq_l,iq_ref_l,filtered_iq_l,raw_iq_l,uq_final_l,"
+            "target_iq_r,iq_ref_r,filtered_iq_r,raw_iq_r,uq_final_r,"
+            "bus_v,sample_idx,status_flags\n"
+        )
+        for s in all_samples:
+            f.write(
+                f"{s.index},{s.target_iq_l_a:.6f},{s.iq_ref_l_a:.6f},{s.filtered_iq_l_a:.6f},"
+                f"{s.raw_iq_l_a:.6f},{s.uq_final_l_v:.6f},{s.target_iq_r_a:.6f},{s.iq_ref_r_a:.6f},"
+                f"{s.filtered_iq_r_a:.6f},{s.raw_iq_r_a:.6f},{s.uq_final_r_v:.6f},{s.bus_v:.6f},"
+                f"{s.sample_idx},{s.status_flags}\n"
+            )
+
+
+def write_fastring_side_csv(all_samples, source: int, snapshot_write_seq: int, out_file: str) -> None:
+    side_label = "R" if source == FASTCAP_SOURCE_RIGHT else "L"
+    with open(out_file, "w", newline="") as f:
+        f.write("idx,target_iq,iq_ref,filtered_iq,raw_iq,uq_final,source,capture_id\n")
+        for idx, s in enumerate(all_samples):
+            if source == FASTCAP_SOURCE_RIGHT:
+                target_iq = s.target_iq_r_a
+                iq_ref = s.iq_ref_r_a
+                filtered_iq = s.filtered_iq_r_a
+                raw_iq = s.raw_iq_r_a
+                uq_final = s.uq_final_r_v
+            else:
+                target_iq = s.target_iq_l_a
+                iq_ref = s.iq_ref_l_a
+                filtered_iq = s.filtered_iq_l_a
+                raw_iq = s.raw_iq_l_a
+                uq_final = s.uq_final_l_v
+            f.write(
+                f"{idx},{target_iq:.6f},{iq_ref:.6f},{filtered_iq:.6f},"
+                f"{raw_iq:.6f},{uq_final:.6f},{side_label},{snapshot_write_seq}\n"
+            )
+
+
 def main():
     parser = argparse.ArgumentParser(description="DebugLink CLI")
     parser.add_argument("--port", required=True, help="Serial port (e.g. COM33)")
@@ -599,6 +844,21 @@ def main():
     p_stream = sub.add_parser("stream", help="Start status stream")
     p_stream.add_argument("--rate", type=int, default=100, help="Stream rate Hz")
 
+    p_fastring = sub.add_parser("fastring", help="Continuous dual-motor ring buffer commands")
+    fastring_sub = p_fastring.add_subparsers(dest="fastring_op")
+    fastring_sub.add_parser("status", help="Query FastRing status")
+    p_fr_dump = fastring_sub.add_parser("dump", help="Read latest FastRing window and write CSV")
+    p_fr_dump.add_argument("--out", required=True, help="Output CSV file path")
+    p_fr_side = fastring_sub.add_parser("side", help="Write one motor side from a FastRing snapshot")
+    p_fr_side.add_argument("--side", required=True, choices=("L", "R"), help="Motor side")
+    p_fr_side.add_argument("--out", required=True, help="Output CSV file path")
+    p_fr_split = fastring_sub.add_parser(
+        "split",
+        help="Read one FastRing snapshot and write synchronized left/right CSV files",
+    )
+    p_fr_split.add_argument("--left-out", required=True, help="Left motor output CSV path")
+    p_fr_split.add_argument("--right-out", required=True, help="Right motor output CSV path")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -619,6 +879,26 @@ def main():
             ok = cmd_balance(ser, args.state == "on", args.retries, args.retry_delay_ms)
         elif args.command == "stream":
             ok = cmd_stream(ser, args.rate, args.retries, args.retry_delay_ms)
+        elif args.command == "fastring":
+            if args.fastring_op is None:
+                p_fastring.print_help()
+                sys.exit(1)
+            if args.fastring_op == "status":
+                ok = cmd_fastring_status(ser, args.retries, args.retry_delay_ms) is not None
+            elif args.fastring_op == "dump":
+                ok = cmd_fastring_dump(ser, args.out, args.retries, args.retry_delay_ms)
+            elif args.fastring_op == "side":
+                ok = cmd_fastring_side(
+                    ser, args.side, args.out, args.retries, args.retry_delay_ms
+                )
+            elif args.fastring_op == "split":
+                ok = cmd_fastring_split(
+                    ser,
+                    args.left_out,
+                    args.right_out,
+                    args.retries,
+                    args.retry_delay_ms,
+                )
     except serial.SerialException as e:
         print(f"[ERROR] {e}")
     finally:

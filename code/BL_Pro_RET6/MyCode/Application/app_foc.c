@@ -71,6 +71,7 @@ uint8_t App_FOCStack_Init(void)
         USB_Debug_Printf("FOC algorithm init failed\r\n");
         return 0U;
     }
+    App_ResetFastRing();
     g_foc_stack_ready = 1U;
     g_last_bus_voltage_sample_tick_ms = HAL_GetTick();
     g_bus_telemetry_ready = 1U;
@@ -591,7 +592,7 @@ static float App_CurrentLoopComputeUq(Motor_t *motor,
 
     uq_final = constrain(uq_final, -voltage_limit, voltage_limit);
 
-    /* 保存调试快照，供串口打印或 FastLog 捕获 */
+    /* 保存调试快照 */
     if (debug != NULL) {
         debug->target_iq = target_iq_cmd;
         debug->iq_ref = iq_ref;
@@ -1452,204 +1453,255 @@ static uint8_t App_BusVoltageStartupSample(void)
 #endif
 
 
-/* FastLog：一次性高速采样缓存。
- * 用于捕获电流阶跃响应，避免实时串口打印影响 10kHz 控制循环。
- * FastLogSample_t 和 APP_FASTLOG_SIZE 定义在 app_foc.h（debug_link.c 也需要）。
- */
-static FastLogSample_t g_fastlog_buf[APP_FASTLOG_SIZE];
-static volatile uint16_t g_fastlog_count = 0U;
-static volatile uint8_t  g_fastlog_armed = 0U;
-static volatile uint8_t  g_fastlog_done  = 0U;
-static volatile uint32_t g_fastlog_capture_id = 0U;
-static volatile uint8_t  g_fastlog_blocked = 0U;
-static volatile uint8_t  g_fastlog_source = FASTLOG_SOURCE_LEFT;
+static FastRingSample_t g_fastring_buf[APP_FASTRING_SIZE];
+static FastRingSample_t g_fastring_snapshot_buf[APP_FASTRING_SIZE];
+static volatile uint16_t g_fastring_head = 0U;
+static volatile uint16_t g_fastring_count = 0U;
+static volatile uint32_t g_fastring_write_seq = 0U;
+static volatile uint16_t g_fastring_snapshot_count = 0U;
+static volatile uint32_t g_fastring_snapshot_write_seq = 0U;
 
 
-/* FastLog 上膛。
- * force_rearm = 0：只有空闲时允许重新采样；
- * force_rearm = 1：强制重新开始一轮采样。
- */
-static uint8_t app_fastlog_try_arm_internal(uint8_t force_rearm)
+
+
+static uint16_t app_fastring_status_flags_snapshot(void)
 {
-    uint8_t can_arm;
+    uint16_t flags = 0U;
 
-    __disable_irq();
-
-    can_arm = (uint8_t)(force_rearm || ((!g_fastlog_armed) && (!g_fastlog_done)));
-
-    if (can_arm) {
-        g_fastlog_count = 0U;
-        g_fastlog_armed = 1U;
-        g_fastlog_done = 0U;
-        g_fastlog_capture_id++;
-        g_fastlog_blocked = 0U;
-    } else {
-        g_fastlog_blocked = 1U;
+    if (g_speed_fault1 > 0.5f) {
+        flags |= APP_FOC_STATUS_FLAG_SPEED_FAULT_L;
     }
-
-    __enable_irq();
-
-    return can_arm;
-}
-
-void App_ArmFastLog(void)
-{
-    (void)app_fastlog_try_arm_internal(0U);
-}
-
-uint8_t App_TryArmFastLog(void)
-{
-    return app_fastlog_try_arm_internal(0U);
-}
-
-void App_StopFastLog(void)
-{
-    __disable_irq();
-    g_fastlog_armed = 0U;
-    __enable_irq();
-}
-
-uint8_t App_SetFastLogSource(uint8_t source)
-{
-    uint8_t ok;
-    __disable_irq();
-    if (g_fastlog_armed) {
-        ok = 0U;
-    } else {
-        g_fastlog_source = source;
-        ok = 1U;
+    if (g_speed_fault2 > 0.5f) {
+        flags |= APP_FOC_STATUS_FLAG_SPEED_FAULT_R;
     }
-    __enable_irq();
-    return ok;
+    if (g_foc_stack_ready != 0U) {
+        flags |= APP_FOC_STATUS_FLAG_STACK_READY;
+    }
+    if (g_foc_control_it_enabled != 0U) {
+        flags |= APP_FOC_STATUS_FLAG_CONTROL_IT_ENABLED;
+    }
+    if (g_bus_voltage_valid != 0U) {
+        flags |= APP_FOC_STATUS_FLAG_BUS_VALID;
+    }
+    flags |= APP_FOC_STATUS_FLAG_CURRENT_LOOP_ACTIVE;
+#if APP_SPEED_LOOP_ENABLE
+    flags |= APP_FOC_STATUS_FLAG_SPEED_LOOP_ENABLED;
+#endif
+#if APP_CURRENT_LOOP_ENABLE
+    flags |= APP_FOC_STATUS_FLAG_CURRENT_LOOP_ENABLED;
+#endif
+    if (g_foc_power_stage_enabled == 0U) {
+        flags |= APP_FOC_STATUS_FLAG_POWER_STAGE_OFF;
+    }
+    if (App_Attitude_IsControlEnabled() != 0U) {
+        flags |= APP_FOC_STATUS_FLAG_ATTITUDE_CONTROL_ON;
+    }
+    return flags;
 }
 
+void App_ResetFastRing(void)
+{
+    __disable_irq();
+    g_fastring_head = 0U;
+    g_fastring_count = 0U;
+    g_fastring_write_seq = 0U;
+    g_fastring_snapshot_count = 0U;
+    g_fastring_snapshot_write_seq = 0U;
+    __enable_irq();
+}
 
-/* 获取 FastLog 状态，供上位机/命令接口查询 */
-void App_GetFastLogStatus(uint16_t *count,
-                          uint8_t *armed,
-                          uint8_t *done,
-                          uint32_t *capture_id,
-                          uint8_t *blocked,
-                          uint8_t *source)
+void App_GetFastRingStatus(uint16_t *count,
+                           uint16_t *capacity,
+                           uint16_t *head,
+                           uint32_t *write_seq)
 {
     uint16_t local_count;
-    uint8_t local_armed;
-    uint8_t local_done;
-    uint32_t local_capture_id;
-    uint8_t local_blocked;
-    uint8_t local_source;
+    uint16_t local_head;
+    uint32_t local_write_seq;
 
     __disable_irq();
-    local_count = g_fastlog_count;
-    local_armed = g_fastlog_armed;
-    local_done = g_fastlog_done;
-    local_capture_id = g_fastlog_capture_id;
-    local_blocked = g_fastlog_blocked;
-    local_source  = g_fastlog_source;
+    local_count = g_fastring_count;
+    local_head = g_fastring_head;
+    local_write_seq = g_fastring_write_seq;
     __enable_irq();
 
     if (count != NULL) {
         *count = local_count;
     }
-    if (armed != NULL) {
-        *armed = local_armed;
+    if (capacity != NULL) {
+        *capacity = APP_FASTRING_SIZE;
     }
-    if (done != NULL) {
-        *done = local_done;
+    if (head != NULL) {
+        *head = local_head;
     }
-    if (capture_id != NULL) {
-        *capture_id = local_capture_id;
-    }
-    if (blocked != NULL) {
-        *blocked = local_blocked;
-    }
-    if (source != NULL) {
-        *source = local_source;
+    if (write_seq != NULL) {
+        *write_seq = local_write_seq;
     }
 }
 
-uint8_t App_CopyFastLogChunk(uint16_t start_idx,
-                             uint8_t max_samples,
-                             FastLogSample_t *out)
+uint16_t App_CopyFastRingLatest(uint16_t start_idx,
+                                uint8_t max_samples,
+                                FastRingSample_t *out)
 {
+    uint16_t local_count;
+    uint16_t local_head;
+    uint16_t base_idx;
     uint16_t available;
-    uint8_t i;
+    uint16_t i;
 
-    if (out == NULL || max_samples == 0U) {
+    if ((out == NULL) || (max_samples == 0U)) {
         return 0U;
     }
 
     __disable_irq();
+    local_count = g_fastring_count;
+    local_head = g_fastring_head;
 
-    if (start_idx >= g_fastlog_count) {
+    if (start_idx >= local_count) {
         __enable_irq();
         return 0U;
     }
 
-    available = (uint16_t)(g_fastlog_count - start_idx);
+    available = (uint16_t)(local_count - start_idx);
     if ((uint16_t)max_samples < available) {
         available = (uint16_t)max_samples;
     }
 
-    for (i = 0U; i < (uint8_t)available; i++) {
-        out[i] = g_fastlog_buf[(uint16_t)(start_idx + (uint16_t)i)];
+    base_idx = (uint16_t)((local_head + APP_FASTRING_SIZE - local_count) % APP_FASTRING_SIZE);
+    for (i = 0U; i < available; i++) {
+        uint16_t ring_idx = (uint16_t)((base_idx + start_idx + i) % APP_FASTRING_SIZE);
+        out[i] = g_fastring_buf[ring_idx];
     }
-
     __enable_irq();
-    return (uint8_t)available;
+
+    return available;
 }
 
-
-/* 在 10kHz 控制循环中记录一帧 FastLog。
- * 这里只写 RAM，不做串口输出，保证实时性。
- */
-APP_FOC_HOT
-static void fastlog_push(const Motor_t *motor, volatile const CurrentLoopDebugSnapshot_t *debug)
+void App_SnapshotFastRing(uint16_t *count,
+                          uint16_t *capacity,
+                          uint32_t *write_seq)
 {
-    uint16_t n;
+    uint16_t local_count;
+    uint16_t local_head;
+    uint16_t base_idx;
+    uint16_t i;
+    uint32_t local_write_seq;
 
-    if ((!g_fastlog_armed) || (debug == NULL)) {
-        return;
+    __disable_irq();
+    local_count = g_fastring_count;
+    local_head = g_fastring_head;
+    local_write_seq = g_fastring_write_seq;
+    __enable_irq();
+
+    base_idx = (uint16_t)((local_head + APP_FASTRING_SIZE - local_count) % APP_FASTRING_SIZE);
+    for (i = 0U; i < local_count; i++) {
+        uint16_t ring_idx = (uint16_t)((base_idx + i) % APP_FASTRING_SIZE);
+        g_fastring_snapshot_buf[i] = g_fastring_buf[ring_idx];
     }
 
-    n = g_fastlog_count;
+    __disable_irq();
+    g_fastring_snapshot_count = local_count;
+    g_fastring_snapshot_write_seq = local_write_seq;
+    __enable_irq();
 
-    if (n >= APP_FASTLOG_SIZE) {
-        g_fastlog_armed = 0U;
-        g_fastlog_done = 1U;
-        return;
+    if (count != NULL) {
+        *count = local_count;
+    }
+    if (capacity != NULL) {
+        *capacity = APP_FASTRING_SIZE;
+    }
+    if (write_seq != NULL) {
+        *write_seq = local_write_seq;
+    }
+}
+
+void App_GetFastRingSnapshotStatus(uint16_t *count,
+                                   uint16_t *capacity,
+                                   uint32_t *write_seq)
+{
+    uint16_t local_count;
+    uint32_t local_write_seq;
+
+    __disable_irq();
+    local_count = g_fastring_snapshot_count;
+    local_write_seq = g_fastring_snapshot_write_seq;
+    __enable_irq();
+
+    if (count != NULL) {
+        *count = local_count;
+    }
+    if (capacity != NULL) {
+        *capacity = APP_FASTRING_SIZE;
+    }
+    if (write_seq != NULL) {
+        *write_seq = local_write_seq;
+    }
+}
+
+uint16_t App_CopyFastRingSnapshotChunk(uint32_t snapshot_write_seq,
+                                       uint16_t start_idx,
+                                       uint8_t max_samples,
+                                       FastRingSample_t *out)
+{
+    uint16_t local_count;
+    uint16_t available;
+    uint16_t i;
+
+    if ((out == NULL) || (max_samples == 0U)) {
+        return 0U;
     }
 
-    g_fastlog_buf[n].target_iq = debug->target_iq;
-    g_fastlog_buf[n].iq_ref = debug->iq_ref;
-    g_fastlog_buf[n].filtered_iq = debug->filtered_iq;
-    g_fastlog_buf[n].raw_iq = debug->raw_iq;
-    g_fastlog_buf[n].pi_out = debug->pi_out;
-    g_fastlog_buf[n].ff_term = debug->ff_term;
-    g_fastlog_buf[n].uq_final = debug->uq_final;
-    g_fastlog_buf[n].ff_coef = debug->ff_coef;
-    g_fastlog_buf[n].integral_limit = debug->integral_limit;
-    g_fastlog_buf[n].pid_integral = debug->pid_integral;
-    g_fastlog_buf[n].bus_raw_adc = (float)g_bus_voltage_debug.raw_adc;
-    g_fastlog_buf[n].bus_pin_voltage = g_bus_voltage_debug.adc_pin_voltage;
-    g_fastlog_buf[n].bus_voltage = g_bus_voltage_debug.bus_voltage;
-
-    if ((motor != NULL) && (motor->sensor != NULL)) {
-        g_fastlog_buf[n].shaft_angle = motor->sensor->data.shaft_angle;
-        g_fastlog_buf[n].shaft_velocity = motor->sensor->data.shaft_velocity;
-        g_fastlog_buf[n].electrical_angle = motor->electrical_angle;
-    } else {
-        g_fastlog_buf[n].shaft_angle = 0.0f;
-        g_fastlog_buf[n].shaft_velocity = 0.0f;
-        g_fastlog_buf[n].electrical_angle = 0.0f;
+    __disable_irq();
+    if (snapshot_write_seq != g_fastring_snapshot_write_seq) {
+        __enable_irq();
+        return 0U;
     }
 
-    g_fastlog_count = (uint16_t)(n + 1U);
-
-    if ((uint16_t)(n + 1U) >= APP_FASTLOG_SIZE) {
-        g_fastlog_armed = 0U;
-        g_fastlog_done = 1U;
+    local_count = g_fastring_snapshot_count;
+    if (start_idx >= local_count) {
+        __enable_irq();
+        return 0U;
     }
+
+    available = (uint16_t)(local_count - start_idx);
+    if ((uint16_t)max_samples < available) {
+        available = (uint16_t)max_samples;
+    }
+
+    for (i = 0U; i < available; i++) {
+        out[i] = g_fastring_snapshot_buf[start_idx + i];
+    }
+    __enable_irq();
+
+    return available;
+}
+
+APP_FOC_HOT
+static void fastring_push_dual(void)
+{
+    FastRingSample_t *sample = &g_fastring_buf[g_fastring_head];
+
+    sample->target_iq_l_ma = app_fastlog_scale_to_i16(g_current_loop_debug1.target_iq, 1000.0f);
+    sample->iq_ref_l_ma = app_fastlog_scale_to_i16(g_current_loop_debug1.iq_ref, 1000.0f);
+    sample->filtered_iq_l_ma = app_fastlog_scale_to_i16(g_current_loop_debug1.filtered_iq, 1000.0f);
+    sample->raw_iq_l_ma = app_fastlog_scale_to_i16(g_current_loop_debug1.raw_iq, 1000.0f);
+    sample->uq_final_l_mv = app_fastlog_scale_to_i16(g_current_loop_debug1.uq_final, 1000.0f);
+
+    sample->target_iq_r_ma = app_fastlog_scale_to_i16(g_current_loop_debug2.target_iq, 1000.0f);
+    sample->iq_ref_r_ma = app_fastlog_scale_to_i16(g_current_loop_debug2.iq_ref, 1000.0f);
+    sample->filtered_iq_r_ma = app_fastlog_scale_to_i16(g_current_loop_debug2.filtered_iq, 1000.0f);
+    sample->raw_iq_r_ma = app_fastlog_scale_to_i16(g_current_loop_debug2.raw_iq, 1000.0f);
+    sample->uq_final_r_mv = app_fastlog_scale_to_i16(g_current_loop_debug2.uq_final, 1000.0f);
+
+    sample->bus_mv = (uint16_t)app_fastlog_scale_to_i16(g_bus_voltage_filtered, 1000.0f);
+    sample->sample_idx = (uint16_t)g_fastring_write_seq;
+    sample->status_flags = app_fastring_status_flags_snapshot();
+
+    g_fastring_head = (uint16_t)((g_fastring_head + 1U) % APP_FASTRING_SIZE);
+    if (g_fastring_count < APP_FASTRING_SIZE) {
+        g_fastring_count++;
+    }
+    g_fastring_write_seq++;
 }
 
 
@@ -1659,7 +1711,7 @@ static void fastlog_push(const Motor_t *motor, volatile const CurrentLoopDebugSn
  * 3. 读取相电流并计算 Iq；
  * 4. 电流环计算 Uq；
  * 5. 输出 FVPWM；
- * 6. 可选 FastLog 记录。
+ * 6. FastRing 记录。
  */
 APP_FOC_HOT
 static uint8_t loopFOC(void)
@@ -1764,11 +1816,7 @@ static uint8_t loopFOC(void)
             Motor_SetPhaseVoltageQBySinCos(&g_motor2, 0.0f, sin_e2, cos_e2);
         }
 
-        if (g_fastlog_source == FASTLOG_SOURCE_RIGHT) {
-            fastlog_push(&g_motor2, &g_current_loop_debug2);
-        } else {
-            fastlog_push(&g_motor1, &g_current_loop_debug1);
-        }
+        fastring_push_dual();
     }
 
     return 1U;
@@ -1839,14 +1887,9 @@ void App_LoopForIT(void)
 }
 
 
-/* 主循环调试输出。
- * FastLog 采满后，在 while 里一次性打印，避免中断中串口阻塞。
- */
+/* 主循环调试输出。 */
 void DebuginWhile(void)
 {
-    uint16_t i;
-    uint16_t sample_count;
-    uint32_t capture_id;
     uint32_t now_ms;
 
     now_ms = HAL_GetTick();
@@ -1854,10 +1897,6 @@ void DebuginWhile(void)
     if ((now_ms - g_last_bus_voltage_sample_tick_ms) >= APP_BUS_VOLTAGE_SAMPLE_PERIOD_MS) {
         g_last_bus_voltage_sample_tick_ms = now_ms;
         App_ServiceBusVoltageSample();
-        // USB_Debug_Printf("BUS:%u,%.4f,%.4f\r\n",
-        //                  (unsigned)g_bus_voltage_debug.raw_adc,
-        //                  g_bus_voltage_filtered,
-        //                  g_bus_voltage_debug.bus_voltage);
     }
 #endif
 
@@ -1865,46 +1904,6 @@ void DebuginWhile(void)
         g_last_while_debug_tick_ms = now_ms;
         /* 预留常规 while 调试输出入口，当前按需求先留空。 */
     }
-
-    if (!g_fastlog_done) {
-        return;
-    }
-
-    uint8_t source;
-    __disable_irq();
-    sample_count = g_fastlog_count;
-    capture_id   = g_fastlog_capture_id;
-    source       = g_fastlog_source;
-    __enable_irq();
-
-    USB_Debug_Printf("[FASTLOG] capture=%lu motor=%c samples=%u format=target_iq,iq_ref,filtered_iq,raw_iq,pi_out,ff_term,uq_final,ff_coef,integral_limit,pid_integral,shaft_angle,shaft_velocity,electrical_angle,bus_raw_adc,bus_pin_voltage,bus_voltage\r\n",
-                     (unsigned long)capture_id,
-                     (source == FASTLOG_SOURCE_RIGHT) ? 'R' : 'L',
-                     (unsigned)sample_count);
-
-    for (i = 0U; i < sample_count; i++) {
-        USB_Debug_Printf("%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\r\n",
-                         g_fastlog_buf[i].target_iq,
-                         g_fastlog_buf[i].iq_ref,
-                         g_fastlog_buf[i].filtered_iq,
-                         g_fastlog_buf[i].raw_iq,
-                         g_fastlog_buf[i].pi_out,
-                         g_fastlog_buf[i].ff_term,
-                         g_fastlog_buf[i].uq_final,
-                         g_fastlog_buf[i].ff_coef,
-                         g_fastlog_buf[i].integral_limit,
-                         g_fastlog_buf[i].pid_integral,
-                         g_fastlog_buf[i].shaft_angle,
-                         g_fastlog_buf[i].shaft_velocity,
-                         g_fastlog_buf[i].electrical_angle,
-                         g_fastlog_buf[i].bus_raw_adc,
-                         g_fastlog_buf[i].bus_pin_voltage,
-                         g_fastlog_buf[i].bus_voltage);
-    }
-
-    __disable_irq();
-    g_fastlog_done = 0U;
-    __enable_irq();
 }
 
 

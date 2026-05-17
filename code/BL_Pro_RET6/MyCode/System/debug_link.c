@@ -156,8 +156,9 @@ static void DebugLink_HandleGetDeviceInfo(const DL_Frame_t *frame)
     payload[2] = DL_FW_MAJOR;
     payload[3] = DL_FW_MINOR;
     payload[4] = DL_FW_PATCH;
-    DL_WriteU16LE(&payload[5], DL_CAP_STATUS_STREAM | DL_CAP_POWER_STAGE_CONTROL |
-                               DL_CAP_ATTITUDE_CONTROL);
+    DL_WriteU16LE(&payload[5], DL_CAP_STATUS_STREAM |
+                               DL_CAP_POWER_STAGE_CONTROL | DL_CAP_ATTITUDE_CONTROL |
+                               DL_CAP_FAST_RING);
     DL_WriteU16LE(&payload[7], DL_PROTO_MAX_PAYLOAD);
 
     len = DL_Protocol_BuildFrame(DL_MSG_DEVICE_INFO_RSP, frame->seq,
@@ -247,6 +248,141 @@ static void DebugLink_HandleAttitudeControl(const DL_Frame_t *frame)
     DebugLink_SendAck(DL_MSG_ATTITUDE_CONTROL_REQ, DL_ACK_STATUS_OK);
 }
 
+#define DL_FASTRING_OP_STATUS     0x01U
+#define DL_FASTRING_OP_SNAPSHOT   0x02U
+#define DL_FASTRING_OP_READ_CHUNK 0x03U
+#define DL_FASTRING_MAX_SAMPLES_PER_CHUNK 8U   /* (240-12)/26 */
+
+static void DebugLink_HandleFastRing(const DL_Frame_t *frame)
+{
+    uint8_t op;
+    uint16_t len;
+
+    if (frame->payload_len < 1U) {
+        DebugLink_SendNack(DL_MSG_FAST_RING_REQ, DL_NACK_BAD_LENGTH);
+        return;
+    }
+
+    op = frame->payload[0];
+
+    switch (op)
+    {
+    case DL_FASTRING_OP_STATUS:
+    {
+        uint16_t count;
+        uint16_t capacity;
+        uint16_t head;
+        uint32_t write_seq;
+        uint8_t payload[12];
+
+        App_GetFastRingStatus(&count, &capacity, &head, &write_seq);
+        payload[0] = DL_FASTRING_OP_STATUS;
+        DL_WriteU16LE(&payload[1], count);
+        DL_WriteU16LE(&payload[3], capacity);
+        DL_WriteU16LE(&payload[5], head);
+        DL_WriteU32LE(&payload[7], write_seq);
+
+        len = DL_Protocol_BuildFrame(DL_MSG_FAST_RING_DATA, frame->seq,
+                                     payload, 11U,
+                                     s_tx_buf, sizeof(s_tx_buf));
+        if (len > 0U) {
+            (void)DebugLink_TryTransmit(s_tx_buf, len);
+        }
+        break;
+    }
+
+    case DL_FASTRING_OP_SNAPSHOT:
+    {
+        uint16_t count;
+        uint16_t capacity;
+        uint32_t snapshot_write_seq_live;
+        uint8_t payload[12];
+
+        App_SnapshotFastRing(&count, &capacity, &snapshot_write_seq_live);
+        payload[0] = DL_FASTRING_OP_SNAPSHOT;
+        DL_WriteU16LE(&payload[1], count);
+        DL_WriteU16LE(&payload[3], capacity);
+        DL_WriteU16LE(&payload[5], 0U);
+        DL_WriteU32LE(&payload[7], snapshot_write_seq_live);
+
+        len = DL_Protocol_BuildFrame(DL_MSG_FAST_RING_DATA, frame->seq,
+                                     payload, 11U,
+                                     s_tx_buf, sizeof(s_tx_buf));
+        if (len > 0U) {
+            (void)DebugLink_TryTransmit(s_tx_buf, len);
+        }
+        break;
+    }
+
+    case DL_FASTRING_OP_READ_CHUNK:
+    {
+        uint16_t start_idx;
+        uint8_t max_samples;
+        uint32_t snapshot_write_seq;
+        uint16_t count;
+        uint16_t capacity;
+        uint32_t write_seq;
+        uint16_t sample_count;
+        uint16_t i;
+        uint8_t payload[DL_PROTO_MAX_PAYLOAD];
+        FastRingSample_t chunk[DL_FASTRING_MAX_SAMPLES_PER_CHUNK];
+
+        if (frame->payload_len < 8U) {
+            DebugLink_SendNack(DL_MSG_FAST_RING_REQ, DL_NACK_BAD_LENGTH);
+            return;
+        }
+
+        snapshot_write_seq = DL_ReadU32LE(&frame->payload[1]);
+        start_idx = DL_ReadU16LE(&frame->payload[5]);
+        max_samples = frame->payload[7];
+        if (max_samples > DL_FASTRING_MAX_SAMPLES_PER_CHUNK) {
+            max_samples = DL_FASTRING_MAX_SAMPLES_PER_CHUNK;
+        }
+
+        App_GetFastRingSnapshotStatus(&count, &capacity, &write_seq);
+        sample_count = App_CopyFastRingSnapshotChunk(snapshot_write_seq, start_idx, max_samples, chunk);
+
+        payload[0] = DL_FASTRING_OP_READ_CHUNK;
+        DL_WriteU16LE(&payload[1], count);
+        DL_WriteU16LE(&payload[3], capacity);
+        DL_WriteU32LE(&payload[5], write_seq);
+        DL_WriteU16LE(&payload[9], start_idx);
+        payload[11] = (uint8_t)sample_count;
+
+        for (i = 0U; i < sample_count; i++) {
+            uint8_t *p = &payload[12U + i * 26U];
+
+            DL_WriteU16LE(&p[0], (uint16_t)chunk[i].target_iq_l_ma);
+            DL_WriteU16LE(&p[2], (uint16_t)chunk[i].iq_ref_l_ma);
+            DL_WriteU16LE(&p[4], (uint16_t)chunk[i].filtered_iq_l_ma);
+            DL_WriteU16LE(&p[6], (uint16_t)chunk[i].raw_iq_l_ma);
+            DL_WriteU16LE(&p[8], (uint16_t)chunk[i].uq_final_l_mv);
+            DL_WriteU16LE(&p[10], (uint16_t)chunk[i].target_iq_r_ma);
+            DL_WriteU16LE(&p[12], (uint16_t)chunk[i].iq_ref_r_ma);
+            DL_WriteU16LE(&p[14], (uint16_t)chunk[i].filtered_iq_r_ma);
+            DL_WriteU16LE(&p[16], (uint16_t)chunk[i].raw_iq_r_ma);
+            DL_WriteU16LE(&p[18], (uint16_t)chunk[i].uq_final_r_mv);
+            DL_WriteU16LE(&p[20], chunk[i].bus_mv);
+            DL_WriteU16LE(&p[22], chunk[i].sample_idx);
+            DL_WriteU16LE(&p[24], chunk[i].status_flags);
+        }
+
+        len = DL_Protocol_BuildFrame(DL_MSG_FAST_RING_DATA, frame->seq,
+                                     payload,
+                                     (uint16_t)(12U + sample_count * 26U),
+                                     s_tx_buf, sizeof(s_tx_buf));
+        if (len > 0U) {
+            (void)DebugLink_TryTransmit(s_tx_buf, len);
+        }
+        break;
+    }
+
+    default:
+        DebugLink_SendNack(DL_MSG_FAST_RING_REQ, DL_NACK_UNSUPPORTED);
+        break;
+    }
+}
+
 static void DebugLink_SendStatusStream(void)
 {
     uint8_t payload[42];
@@ -324,6 +460,10 @@ static void DebugLink_ProcessRxFrame(void)
 
     case DL_MSG_ATTITUDE_CONTROL_REQ:
         DebugLink_HandleAttitudeControl(&frame);
+        break;
+
+    case DL_MSG_FAST_RING_REQ:
+        DebugLink_HandleFastRing(&frame);
         break;
 
     default:

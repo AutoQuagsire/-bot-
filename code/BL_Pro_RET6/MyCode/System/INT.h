@@ -41,23 +41,5 @@ typedef struct {
 
 extern pid_csv_data_t pid_csv_data;
 
-/* 高频采样缓存：10kHz ISR采样，主循环慢速导出 */
-#ifndef PID_FAST_LOG_ENABLE
-#define PID_FAST_LOG_ENABLE 1U
-#endif
-
-#define PID_FAST_LOG_CAPACITY 512U
-
-typedef struct {
-	float setpoint;      /* 电流目标(A) */
-	float filtered_iq;   /* 电流反馈(A) */
-	float raw_iq;        /* 原始Iq(A) */
-	float uq_final;      /* 电压输出命令 */
-} pid_fast_log_sample_t;
-
-extern volatile pid_fast_log_sample_t pid_fast_log[PID_FAST_LOG_CAPACITY];
-extern volatile uint16_t pid_fast_log_count;
-extern volatile uint8_t pid_fast_log_full;
-extern volatile uint8_t pid_fast_log_capture_enable;
 
 #endif
