@@ -1,5 +1,5 @@
 """
-DebugLink data models — strongly-typed dataclasses for stream and fastcap.
+DebugLink data models — strongly-typed dataclasses for stream and fastring.
 
 Wire-format scale: deg (x100), radps (x1000), A (x1000 or /1000), V (x1000).
 All float fields are after scaling has been applied by the parser.
@@ -37,33 +37,31 @@ class LiveFrame:
 
 
 @dataclass
-class FastCapMeta:
-    """Metadata for one fast-capture session (0x91 STATUS / header of READ_CHUNK).
-
-    Wire layout (13 bytes, debug_link.c:319):
-        op_echo(u8) source(u8) capture_id(u32) total_count(u16)
-        armed(u8) done(u8) blocked(u8) capacity(u16)
-    """
+class FastRingMeta:
+    """Metadata for the dual-motor continuous ring buffer."""
 
     op_echo: int
-    capture_id: int  # uint32 on the wire
-    source: int
     total_count: int
-    armed: bool
-    done: bool
-    blocked: bool
     capacity: int
+    head: int
+    write_seq: int
 
 
 @dataclass
-class FastCapSample:
-    """One sample inside a fast-capture chunk."""
+class FastRingSample:
+    """One dual-motor sample from the continuous FastRing buffer."""
 
-    capture_id: int
-    source: int
     index: int
-    target_iq_a: float
-    iq_ref_a: float
-    filtered_iq_a: float
-    raw_iq_a: float
-    uq_final_v: float
+    target_iq_l_a: float
+    iq_ref_l_a: float
+    filtered_iq_l_a: float
+    raw_iq_l_a: float
+    uq_final_l_v: float
+    target_iq_r_a: float
+    iq_ref_r_a: float
+    filtered_iq_r_a: float
+    raw_iq_r_a: float
+    uq_final_r_v: float
+    bus_v: float
+    sample_idx: int
+    status_flags: int

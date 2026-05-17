@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DebugLinkTransport smoke test — exercises ping, get_info, and stream.
+DebugLinkTransport smoke test for ping, get_info, and stream.
 
 Usage::
 
@@ -11,7 +11,6 @@ Usage::
 import argparse
 import sys
 import threading
-import time
 
 from debuglink_transport import DebugLinkTransport, TransportError
 
@@ -25,7 +24,6 @@ def main():
 
     t = DebugLinkTransport()
 
-    # ── connect ──────────────────────────────────────────────────────
     try:
         t.connect(args.port, args.baud)
         print(f"[DEMO] connected to {args.port} @ {args.baud}")
@@ -36,13 +34,11 @@ def main():
     ok = True
 
     try:
-        # ── ping ─────────────────────────────────────────────────────
         ping_ok = t.ping()
         print(f"[DEMO] ping -> {'OK' if ping_ok else 'FAIL'}")
         if not ping_ok:
             ok = False
 
-        # ── get_info ─────────────────────────────────────────────────
         try:
             info = t.get_info()
             print("[DEMO] device info:")
@@ -55,7 +51,6 @@ def main():
             print(f"[DEMO] get_info failed: {e}")
             ok = False
 
-        # ── stream (first frame then stop) ───────────────────────────
         first_frame_event = threading.Event()
         first_frame = None
 
@@ -71,12 +66,11 @@ def main():
         print(f"[DEMO] stream_start(rate={args.rate}) -> {'OK' if stream_ok else 'FAIL'}")
 
         if stream_ok:
-            # wait for the first frame (with timeout)
             got_frame = first_frame_event.wait(timeout=3.0)
             if got_frame and first_frame is not None:
                 f = first_frame
                 fault_hex = f"0x{f.fault_flags:04X}"
-                print(f"[DEMO] first stream frame:")
+                print("[DEMO] first stream frame:")
                 print(f"  tick_ms             = {f.tick_ms}")
                 print(f"  pitch_target_deg    = {f.pitch_target_deg:+.2f}")
                 print(f"  speed_p_term_deg    = {f.speed_p_term_deg:+.2f}")

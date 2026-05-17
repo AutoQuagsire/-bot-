@@ -14,12 +14,12 @@
 
 /* 能力标志 */
 #define DL_CAP_STATUS_STREAM   (1U << 0)
-#define DL_CAP_FAST_CAPTURE    (1U << 1)
 #define DL_CAP_PARAM_READ      (1U << 2)
 #define DL_CAP_PARAM_WRITE     (1U << 3)
 #define DL_CAP_PARAM_SAVE      (1U << 4)
 #define DL_CAP_POWER_STAGE_CONTROL  (1U << 5)
 #define DL_CAP_ATTITUDE_CONTROL     (1U << 6)
+#define DL_CAP_FAST_RING            (1U << 7)
 
 /* STATUS_STREAM 状态快照结构体 — 24 字节 */
 typedef struct

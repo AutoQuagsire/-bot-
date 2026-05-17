@@ -23,17 +23,17 @@ typedef enum
     DL_MSG_GET_PARAM_REQ        = 0x11,
     DL_MSG_SET_PARAM_REQ        = 0x12,
     DL_MSG_SAVE_PARAMS_REQ      = 0x13,
-    DL_MSG_FAST_CAPTURE_REQ     = 0x14,
     DL_MSG_POWER_STAGE_REQ      = 0x15,
     DL_MSG_ATTITUDE_CONTROL_REQ = 0x16,
+    DL_MSG_FAST_RING_REQ        = 0x17,
 
     DL_MSG_ACK                  = 0x80,
     DL_MSG_NACK                 = 0x81,
     DL_MSG_DEVICE_INFO_RSP      = 0x82,
     DL_MSG_PARAM_VALUE_RSP      = 0x83,
     DL_MSG_STATUS_STREAM        = 0x90,
-    DL_MSG_FAST_CAPTURE_DATA    = 0x91,
-    DL_MSG_EVENT                = 0x92
+    DL_MSG_EVENT                = 0x92,
+    DL_MSG_FAST_RING_DATA       = 0x93
 } DL_MessageType_t;
 
 typedef enum

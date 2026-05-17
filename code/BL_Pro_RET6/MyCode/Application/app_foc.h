@@ -14,27 +14,23 @@
 #define APP_FOC_STATUS_FLAG_POWER_STAGE_OFF      (1U << 14)
 #define APP_FOC_STATUS_FLAG_ATTITUDE_CONTROL_ON  (1U << 15)
 
-/* FastLog：高速采样缓存（共享给 debug_link.c） */
-#define APP_FASTLOG_SIZE (512U)
+#define APP_FASTRING_SIZE (512U)
 
 typedef struct {
-    float target_iq;
-    float iq_ref;
-    float filtered_iq;
-    float raw_iq;
-    float pi_out;
-    float ff_term;
-    float uq_final;
-    float ff_coef;
-    float integral_limit;
-    float pid_integral;
-    float shaft_angle;
-    float shaft_velocity;
-    float electrical_angle;
-    float bus_raw_adc;
-    float bus_pin_voltage;
-    float bus_voltage;
-} FastLogSample_t;
+    int16_t target_iq_l_ma;
+    int16_t iq_ref_l_ma;
+    int16_t filtered_iq_l_ma;
+    int16_t raw_iq_l_ma;
+    int16_t uq_final_l_mv;
+    int16_t target_iq_r_ma;
+    int16_t iq_ref_r_ma;
+    int16_t filtered_iq_r_ma;
+    int16_t raw_iq_r_ma;
+    int16_t uq_final_r_mv;
+    uint16_t bus_mv;
+    uint16_t sample_idx;
+    uint16_t status_flags;
+} FastRingSample_t;
 
 typedef struct
 {
@@ -58,21 +54,24 @@ void App_SensorDirectionTest(void);
 void App_FOCControlIT_Enable(void);
 void App_LoopForIT(void);
 void DebuginWhile(void);
-void App_ArmFastLog(void);
-uint8_t App_TryArmFastLog(void);
-void App_StopFastLog(void);
-#define FASTLOG_SOURCE_LEFT  0U
-#define FASTLOG_SOURCE_RIGHT 1U
-uint8_t App_SetFastLogSource(uint8_t source);
-void App_GetFastLogStatus(uint16_t *count,
-                          uint8_t *armed,
-                          uint8_t *done,
-                          uint32_t *capture_id,
-                          uint8_t *blocked,
-                          uint8_t *source);
-uint8_t App_CopyFastLogChunk(uint16_t start_idx,
-                             uint8_t max_samples,
-                             FastLogSample_t *out);
+void App_ResetFastRing(void);
+void App_GetFastRingStatus(uint16_t *count,
+                           uint16_t *capacity,
+                           uint16_t *head,
+                           uint32_t *write_seq);
+void App_SnapshotFastRing(uint16_t *count,
+                          uint16_t *capacity,
+                          uint32_t *write_seq);
+void App_GetFastRingSnapshotStatus(uint16_t *count,
+                                   uint16_t *capacity,
+                                   uint32_t *write_seq);
+uint16_t App_CopyFastRingLatest(uint16_t start_idx,
+                                uint8_t max_samples,
+                                FastRingSample_t *out);
+uint16_t App_CopyFastRingSnapshotChunk(uint32_t snapshot_write_seq,
+                                       uint16_t start_idx,
+                                       uint8_t max_samples,
+                                       FastRingSample_t *out);
 void App_ResetSpeedPIDs(void);
 void App_ResetCurrentPIDs(void);
 void App_FOC_SetIqTarget(float left_iq, float right_iq);
